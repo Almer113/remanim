@@ -57,6 +57,8 @@ export interface Model {
   fps: number;
   width: number;
   height: number;
+  frame_width?: number;   // scene units across the frame (14.22 by default)
+  frame_height?: number;
   error: { code: string; message: string; line: number | null } | null;
   census: { statements: number; pct: Record<string, number> } | null;
   active: string | null;
@@ -85,7 +87,18 @@ export interface Obj {
   call_text?: string;
   kwargs?: Record<string, string>;
   args?: string[];
+  /** a group the user made (`VGroup(a, b)`): no pixels of its own */
+  virtual?: boolean;
+  /** index into the same objects list of the group this one is in */
+  parent?: number;
+  p0?: [number, number];
+  placement?: Record<string, unknown>;
 }
+
+/** What the library panel hands to the canvas on drop. */
+export type LibItem =
+  | { kind: "shape"; class: string; entrance?: string }
+  | { kind: "preset"; preset: string };
 
 export interface DiffHunk {
   line: number;

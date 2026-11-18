@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Conn, frameUrl, query } from "./api";
-import type { Clip, DiffHunk, Model, Obj, SceneModel } from "./types";
-import { Canvas } from "./Canvas";
+import type { Clip, DiffHunk, LibItem, Model, Obj, SceneModel } from "./types";
+import { Canvas, type Gesture } from "./Canvas";
+import { Library } from "./Library";
 import { Timeline } from "./Timeline";
 import { Inspector } from "./Inspector";
 import { CodePeek } from "./CodePeek";
@@ -9,7 +10,8 @@ import { CodePeek } from "./CodePeek";
 const conn = new Conn();
 
 interface Toast { id: number; kind: "ok" | "bad" | "info"; text: string }
-interface Preview { token: string; summary: string; why: string; diff: DiffHunk[] }
+interface Alt { token: string; summary: string; diff: DiffHunk[]; label: string }
+interface Preview { token: string; summary: string; why: string; diff: DiffHunk[]; also: string[]; alts: Alt[] }
 export type Selection =
   | { kind: "object"; obj: Obj }
   | { kind: "clip"; clip: number; anim: number | null }
@@ -27,6 +29,8 @@ export function App() {
   // objects belong to one frame of one revision; anything else is stale
   const [objs, setObjs] = useState<{ key: string; list: Obj[] }>({ key: "", list: [] });
   const [sel, setSel] = useState<Selection>(null);
+  const [others, setOthers] = useState<string[]>([]);  // shift-click adds to the selection
+  const [leftTab, setLeftTab] = useState<"layers" | "library">("layers");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [lastDiff, setLastDiff] = useState<DiffHunk[] | null>(null);
@@ -202,7 +206,7 @@ export function App() {
     } else if (r.type === "edit.refused") {
       toast("bad", `✗ Not changed: ${r.reason}`);
     } else if (r.type === "edit.preview") {
-      setPreview({ token: r.token, summary: r.summary, why: r.why, diff: r.diff });
+      setPreview({ token: r.token, summary: r.summary, why: r.why, diff: r.diff, also: r.also_moves ?? [], alts: r.alternatives ?? [] });
     } else if (r.type === "error") {
       toast("bad", r.message);
     }
@@ -213,6 +217,73 @@ export function App() {
     setBusy(true);
     conn.request({ ...msg, file: model.file, scene: scene.name, rev: model.rev }).then(handleReply);
   }, [model, scene, handleReply]);
+
+  const select = useCallback((o: Obj | null, how: "set" | "toggle" = "set") => {
+    if (!o) { setSel(null); setOthers([]); return; }
+    if (how === "toggle" && sel?.kind === "object") {
+      if (o.id === sel.obj.id) return;
+      setOthers((l) => l.includes(o.id) ? l.filter((x) => x !== o.id) : [...l, o.id]);
+      return;
+    }
+    setSel({ kind: "object", obj: o });
+    setOthers([]);
+  }, [sel]);
+
+  const canEdit = ready && !busy && !preview && !err && rest && !playing;
+
+  const onGesture = useCallback((g: Gesture) => {
+    if (g.kind === "move") sendEdit({ type: "edit.move", object: g.obj, f, dx: g.dx, dy: g.dy });
+    else if (g.kind === "scale") sendEdit({ type: "edit.scale", object: g.obj, f, k: g.k });
+    else sendEdit({ type: "edit.rotate", object: g.obj, f, deg: g.deg });
+  }, [sendEdit, f]);
+
+  const onDrop = useCallback((item: LibItem, x: number, y: number, on: Obj | null) => {
+    if (!canEdit) return;
+    if (item.kind === "shape") {
+      sendEdit({ type: "edit.insert", class: item.class, x, y, f, ...(item.entrance ? { entrance: item.entrance } : {}) });
+    } else if (on) {
+      sendEdit({ type: "edit.preset", object: on, preset: item.preset, f });
+    } else {
+      toast("info", `Drop ${item.preset} on an object`);
+    }
+  }, [canEdit, sendEdit, f, toast]);
+
+  const onPick = useCallback((item: LibItem) => {
+    if (item.kind === "shape") onDrop(item, 0, 0, null);
+    else if (sel?.kind === "object") onDrop(item, 0, 0, sel.obj);
+    else toast("info", `Select an object first, or drag ${item.preset} onto one`);
+  }, [onDrop, sel, toast]);
+
+  const selectedObjs = sel?.kind === "object"
+    ? [sel.obj, ...others.map((id) => objects.find((o) => o.id === id)).filter((o): o is Obj => !!o)] : [];
+
+  const doDelete = useCallback(() => {
+    if (!canEdit || !sel) return;
+    if (sel.kind === "object") sendEdit({ type: "edit.delete", object: sel.obj, f });
+    else sendEdit({ type: "edit.delete_clip", clip: sel.clip, anim: sel.anim });
+    setSel(null);
+    setOthers([]);
+  }, [canEdit, sel, sendEdit, f]);
+  const doDuplicate = useCallback(() => {
+    if (canEdit && sel?.kind === "object") sendEdit({ type: "edit.duplicate", object: sel.obj, f });
+  }, [canEdit, sel, sendEdit, f]);
+  const doGroup = useCallback(() => {
+    if (!canEdit) return;
+    if (selectedObjs.length < 2) { toast("info", "Shift-click a second object to group them"); return; }
+    sendEdit({ type: "edit.group", objects: selectedObjs, f });
+  }, [canEdit, selectedObjs, sendEdit, f, toast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const newFile = useCallback(() => {
+    const name = window.prompt("New scene file (inside the project), e.g. my_scene.py", "my_scene.py");
+    if (!name) return;
+    conn.request({ type: "file.new", name }).then((r) => {
+      if (r.type !== "file.created") { toast("bad", r.message ?? "Couldn't make the file"); return; }
+      fetch("/api/files").then((x) => x.json()).then(setFiles).catch(() => {});
+      setFile(r.file);
+      setLeftTab("library");
+      toast("ok", `✓ Made ${r.file} with scene ${r.scene}`);
+    });
+  }, [toast]);
 
   const undoRedo = useCallback((which: "undo" | "redo") => {
     if (!model || busy || preview || !(which === "undo" ? model.undo : model.redo)) return;
@@ -236,13 +307,26 @@ export function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         undoRedo(e.shiftKey ? "redo" : "undo");
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        undoRedo("redo");
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        doDuplicate();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        doGroup();
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        doDelete();
       } else if (e.key === "Escape") {
         setSel(null);
+        setOthers([]);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [f, fps, seek, undoRedo, togglePlay, preview, ready]);
+  }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup]);
 
   return (
     <div className="app">
@@ -252,6 +336,7 @@ export function App() {
           <option value="" disabled>Open a scene file…</option>
           {files.map((x) => <option key={x.path} value={x.path}>{x.path}</option>)}
         </select>
+        <button onClick={newFile} title="A new scene file from the studio template">+ New file</button>
         {model && (
           <select value={scene?.name ?? ""} onChange={(e) => chooseScene(e.target.value)} title="Scene">
             {model.scenes.map((s) => <option key={s.name} value={s.name}>{s.name}{s.pending ? " (tracing…)" : ""}</option>)}
@@ -277,17 +362,20 @@ export function App() {
       {file && (
         <div className="main">
           <aside className="panel layers">
-            <h3>Layers <small>at {time}s</small></h3>
-            {objects.length === 0 && <div className="muted">{ready ? "Nothing selectable on screen" : "…"}</div>}
-            {objects.map((o) => (
-              <div key={o.id} className={`layer ${sel?.kind === "object" && sel.obj.id === o.id ? "sel" : ""}`}
-                onClick={() => setSel({ kind: "object", obj: o })} title={o.call_text ?? o.id}>
-                <span className="lname">{o.name ?? o.class}</span>
-                <span className="badge">{o.class}</span>
-                {o.tier === 2 && <span className="badge" title="tier 2: computed; literals editable">≈</span>}
-                {o.tier === 3 && <span className="badge" title="tier 3: code only">🔒</span>}
-              </div>
-            ))}
+            <div className="tabs">
+              <button className={leftTab === "layers" ? "on" : ""} onClick={() => setLeftTab("layers")}>Layers</button>
+              <button className={leftTab === "library" ? "on" : ""} onClick={() => setLeftTab("library")}>Library</button>
+              <small className="muted">at {time}s</small>
+            </div>
+            {leftTab === "library" ? (
+              <Library disabled={!canEdit} hasSelection={sel?.kind === "object"} onPick={onPick} />
+            ) : (
+              <>
+                {objects.length === 0 && <div className="muted">{ready ? "Nothing selectable on screen" : "…"}</div>}
+                <LayerTree objects={objects} sel={sel?.kind === "object" ? sel.obj.id : null} others={others}
+                  onPick={(o, toggle) => select(o, toggle ? "toggle" : "set")} />
+              </>
+            )}
           </aside>
 
           <section className="stage">
@@ -296,9 +384,14 @@ export function App() {
                 url={frameUrl(model.file, scene.name, model.rev, f, rest && !playing, session)}
                 idmapUrl={rest && !playing ? `/idmap?${query(model.file, scene.name, model.rev, f, session)}` : null}
                 width={model.width} height={model.height}
+                frameW={model.frame_width ?? 14.2222} frameH={model.frame_height ?? 8}
                 objects={rest && !playing ? objects : []}
                 selected={sel?.kind === "object" ? sel.obj.id : null}
-                onSelect={(o) => setSel(o ? { kind: "object", obj: o } : null)}
+                others={others}
+                onSelect={select}
+                onGesture={onGesture}
+                onDrop={onDrop}
+                editable={canEdit}
                 stale={!!err}
               />
             ) : (
@@ -316,7 +409,8 @@ export function App() {
 
           <aside className="panel inspector">
             <Inspector sel={sel} scene={scene && !scene.pending ? scene : null} model={model} busy={busy} f={f}
-              onScreen={sel?.kind !== "object" || selOnScreen} sendEdit={sendEdit} />
+              onScreen={sel?.kind !== "object" || selOnScreen} sendEdit={sendEdit}
+              actions={{ remove: doDelete, duplicate: doDuplicate, group: doGroup, count: selectedObjs.length }} />
           </aside>
 
           <section className="timeline-wrap">
@@ -341,14 +435,33 @@ export function App() {
           <div className="modal">
             <h4>Check this edit first</h4>
             <p>{preview.why}</p>
+            {preview.also.length > 0 && <p className="note">This also moves: {preview.also.join(", ")}</p>}
             <DiffView diff={preview.diff} />
+            {preview.alts.map((a) => (
+              <div key={a.token}>
+                <p className="alt-head">Or change only this one: {a.summary.replace(/^only this one: /, "")}</p>
+                <DiffView diff={a.diff} />
+              </div>
+            ))}
             <div className="btns">
-              <button onClick={() => { conn.send({ type: "edit.cancel", file: model?.file, token: preview.token }); setPreview(null); }}>Cancel</button>
+              <button onClick={() => {
+                for (const t of [preview.token, ...preview.alts.map((a) => a.token)]) conn.send({ type: "edit.cancel", file: model?.file, token: t });
+                setPreview(null);
+              }}>Cancel</button>
+              {preview.alts.map((a) => (
+                <button key={a.token} onClick={() => {
+                  setBusy(true);
+                  conn.send({ type: "edit.cancel", file: model?.file, token: preview.token });
+                  conn.request({ type: "edit.confirm", file: model?.file, token: a.token }).then(handleReply);
+                  setPreview(null);
+                }}>{a.label}</button>
+              ))}
               <button className="pri" onClick={() => {
                 setBusy(true);
+                for (const a of preview.alts) conn.send({ type: "edit.cancel", file: model?.file, token: a.token });
                 conn.request({ type: "edit.confirm", file: model?.file, token: preview.token }).then(handleReply);
                 setPreview(null);
-              }}>Apply</button>
+              }}>{preview.alts.length ? "Every one" : "Apply"}</button>
             </div>
           </div>
         </div>
@@ -360,6 +473,43 @@ export function App() {
       </div>
     </div>
   );
+}
+
+/** Objects on screen as a tree: a group the user made holds its parts.
+ * Click selects, Shift-click adds to the selection. */
+function LayerTree({ objects, sel, others, onPick }: {
+  objects: Obj[]; sel: string | null; others: string[]; onPick: (o: Obj, toggle: boolean) => void;
+}) {
+  const kids = new Map<number, number[]>();
+  const roots: number[] = [];
+  objects.forEach((o, i) => {
+    if (o.parent !== undefined && objects[o.parent]) {
+      const l = kids.get(o.parent) ?? [];
+      l.push(i);
+      kids.set(o.parent, l);
+    } else roots.push(i);
+  });
+  const row = (i: number, depth: number, seen: Set<number>): React.ReactNode => {
+    if (seen.has(i)) return null;
+    seen.add(i);
+    const o = objects[i];
+    const cls = o.id === sel ? "sel" : others.includes(o.id) ? "sel2" : "";
+    return (
+      <div key={o.id}>
+        <div className={`layer ${cls}`} style={{ paddingLeft: 6 + depth * 12 }}
+          onClick={(e) => onPick(o, e.shiftKey)} title={o.call_text ?? o.id}>
+          <span className="lname">{o.virtual ? "▾ " : ""}{o.name ?? o.class}</span>
+          <span className="badge">{o.class}</span>
+          {o.tier === 2 && <span className="badge" title="tier 2: computed; literals editable">≈</span>}
+          {o.tier === 3 && <span className="badge" title="tier 3: code only">🔒</span>}
+        </div>
+        {(kids.get(i) ?? []).map((j) => row(j, depth + 1, seen))}
+      </div>
+    );
+  };
+  const seen = new Set<number>();
+  // groups first, the way they read in the code
+  return <>{[...roots.filter((i) => objects[i].virtual), ...roots.filter((i) => !objects[i].virtual)].map((i) => row(i, 0, seen))}</>;
 }
 
 export function DiffView({ diff }: { diff: DiffHunk[] }) {

@@ -303,6 +303,33 @@ def plan_property(src: Source, obj: dict, prop: str, value: dict) -> Plan:
     return _confirm_loop(src, call, plan)
 
 
+# a property set on one object after it is made: the setter a person would write
+SETTERS = {"color": "set_color({v})", "fill_color": "set_fill({v})", "fill_opacity": "set_fill(opacity={v})",
+           "stroke_color": "set_stroke({v})", "stroke_width": "set_stroke(width={v})",
+           "stroke_opacity": "set_stroke(opacity={v})", "opacity": "set_opacity({v})"}
+
+
+def plan_property_override(src: Source, obj: dict, prop: str, value: dict) -> Plan | None:
+    """Tier-2 override (code_spec §5): for one of many objects a loop, a
+    comprehension or a helper makes, `dots[2].set_color(RED)` on a new line
+    after the group's last placement, instead of changing every one."""
+    if "default" in value or not src.ok:
+        return None
+    from .moves import insert_after, override_target
+    target = override_target(src, obj)
+    if target is None:
+        return None
+    expr, after = target
+    text = _value_text(src, None, value)
+    call = SETTERS.get(prop, "set(" + prop + "={v})").format(v=text)
+    try:
+        e = insert_after(src, after, f"{expr}.{call}")
+    except EditError:
+        return None
+    return Plan([e], f"only this one: new line {expr}.{call} after line {after.end_lineno}", None,
+                checks={"prop": prop, "value": value})
+
+
 def _value_text(src, node, value: dict) -> str:
     if "number" in value:
         try:

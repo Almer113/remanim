@@ -32,6 +32,7 @@ from manim import ImageMobject, Scene, VMobject, Wait, config, tempconfig  # noq
 from manim.renderer.cairo_renderer import CairoRenderer  # noqa: E402
 
 from .identity import OriginTracker, object_id, parent_map, resolve, site_of  # noqa: E402
+from .moves import MoveRecorder, parent_of, placement  # noqa: E402
 
 QUALITIES = {"l": "low_quality", "m": "medium_quality", "h": "high_quality"}
 SUPPORTED = "0.22."
@@ -45,6 +46,7 @@ class EngineError(Exception):
 
 # -- adapter: everything patched in Manim, installed once per process -------
 _tracker: OriginTracker | None = None
+_recorder: MoveRecorder | None = None
 _orig_play = CairoRenderer.play
 
 
@@ -96,6 +98,8 @@ def install() -> OriginTracker:
     except Exception:
         pass
     _tracker = OriginTracker()
+    global _recorder
+    _recorder = MoveRecorder(_tracker)
     return _tracker
 
 
@@ -366,10 +370,30 @@ def _id_map(scene):
         pos = np.clip(np.searchsorted(keys, code), 0, len(keys) - 1)
         hit = valid & (keys[pos] == code)
         out[hit] = vals[pos[hit]]
-    return out, [describe_object(m, o, how) for m, o, how in objects]
+    described = [describe_object(m, o, how, parents) for m, o, how in objects]
+    # groups the user made (VGroup(a, b)) are selectable too (alt-click, Layers):
+    # they have no pixels of their own, so they come after the drawn objects
+    index = {id(m): i for i, (m, _, _) in enumerate(objects)}
+    for i in range(len(objects)):
+        mob = objects[i][0]
+        child, p = i, parent_of(mob, parents)
+        while p is not None and len(described) < 400:
+            po = getattr(p, "_studio_origin", None)
+            if po is not None and po.site is not None:
+                j = index.get(id(p))
+                if j is None:
+                    j = index[id(p)] = len(described)
+                    d = describe_object(p, po, "group", parents)
+                    d["virtual"] = True
+                    described.append(d)
+                    objects.append((p, po, "group"))
+                described[child].setdefault("parent", j)
+                child = j
+            p = parent_of(p, parents)
+    return out, described
 
 
-def describe_object(mob, origin, how) -> dict:
+def describe_object(mob, origin, how, parents=None) -> dict:
     d = {"id": object_id(mob), "class": type(mob).__name__, "how": how,
          "site": origin.site.span() if origin and origin.site else None,
          "user_site": origin.user_site.span() if origin and origin.user_site else None,
@@ -381,8 +405,18 @@ def describe_object(mob, origin, how) -> dict:
          "regenerated": bool(origin and origin.regenerated)}
     try:
         c = mob.get_center()
-        d["center"] = [round(float(c[0]), 3), round(float(c[1]), 3)]
-        d["size"] = [round(float(mob.width), 3), round(float(mob.height), 3)]
+        d["center"] = [round(float(c[0]), 4), round(float(c[1]), 4)]
+        d["size"] = [round(float(mob.width), 4), round(float(mob.height), 4)]
+        # a point on the object, to check scales and rotations (the centre alone can't)
+        for m in mob.get_family():
+            pts = getattr(m, "points", None)
+            if pts is not None and len(pts):
+                d["p0"] = [round(float(pts[0][0]), 4), round(float(pts[0][1]), 4)]
+                break
+    except Exception:
+        pass
+    try:
+        d["placement"] = placement(mob, parents or {})
     except Exception:
         pass
     if isinstance(mob, VMobject):
@@ -452,6 +486,11 @@ class Engine:
         with tempconfig(self.config):
             return int(config.pixel_width), int(config.pixel_height)
 
+    @property
+    def frame_units(self) -> tuple[float, float]:
+        with tempconfig(self.config):
+            return float(config.frame_width), float(config.frame_height)
+
     def scenes(self) -> list[str]:
         """Every Scene subclass defined in the file with a construct() of its
         own or inherited (not Scene's empty one): corpus.md finding."""
@@ -491,14 +530,19 @@ class Engine:
                 # what the code asked for; "duration" is that rounded to whole frames
                 "nominal": round(float(getattr(scene, "duration", n_frames * step)), 6),
                 "call": site.span() if site else None, "func": site.func if site else None,
+                # every scene-file call on the stack, outermost first (which
+                # statement of construct() a helper's play() belongs to)
+                "chain": [s.span() for s in self.tracker.user_chain(f)] if f is not None else [],
                 "call_line": site.line if site else None,
                 "in_helper": bool(site and site.func not in ("construct",)),
                 "anims": anims}
 
     def run(self, scene_name: str, t: float | None = None, want_ids: bool = False,
-            events: list | None = None):
-        """Run construct() with every play skipped to its end; with t, stop
-        there and capture the frame. Returns (Capture, scene, end time)."""
+            events: list | None = None, stop: bool = True):
+        """Run construct() with every play skipped to its end; with t, capture
+        the frame there and stop (or, with stop=False, run on to the end: one
+        run gives both the frame and the whole trace). Returns (Capture,
+        scene, end time)."""
         cls = getattr(self.module, scene_name)
         captured: dict = {}
         engine = self
@@ -530,7 +574,9 @@ class Engine:
                         scene.update_to_time(lt)
                 renderer.time = clock
                 captured["c"] = capture(scene, want_ids)
-                raise _StopAt
+                if stop:
+                    raise _StopAt
+                renderer.time = start
             if not frozen and n_frames:
                 scene.update_to_time(np.arange(0, dur, step)[-1])
             for anim in scene.animations:
@@ -561,12 +607,15 @@ class Engine:
             raise self._error(e) from None
         return captured.get("c"), scene, scene.renderer.time
 
-    def trace(self, scene_name: str) -> dict:
+    def trace(self, scene_name: str, t: float | None = None, want_ids: bool = False):
+        """The scene's clips; with t, also the frame at t from the same run:
+        (trace, Capture or None)."""
         events: list = []
         err = None
         end = 0.0
+        cap = None
         try:
-            _, scene, end = self.run(scene_name, None, False, events)
+            cap, scene, end = self.run(scene_name, t, want_ids, events, stop=False)
         except EngineError as e:
             err = {"message": str(e), "line": e.line, "traceback": e.tb}
             if events:
@@ -574,8 +623,9 @@ class Engine:
                 end = last["start"] + last["duration"]
         bases = [c.__name__ for c in getattr(self.module, scene_name).__mro__[1:]
                  if c.__module__.startswith("manim") or c.__name__ in ("TimedScene",)][:3]
-        return {"name": scene_name, "events": events, "duration": round(end, 6), "error": err,
-                "bases": bases, "target": getattr(getattr(self.module, scene_name), "TARGET", None) or None}
+        out = {"name": scene_name, "events": events, "duration": round(end, 6), "error": err,
+               "bases": bases, "target": getattr(getattr(self.module, scene_name), "TARGET", None) or None}
+        return out if t is None else (out, cap)
 
     # -- frames ---------------------------------------------------------------
     def frame(self, scene_name: str, t: float, want_ids: bool) -> Capture:

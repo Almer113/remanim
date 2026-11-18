@@ -161,3 +161,26 @@ def test_same_server_origin(origin, ok):
 def test_host_names(host, ok):
     from studio.server.app import LOCAL_HOSTS, _host_name
     assert (_host_name(host) in LOCAL_HOSTS) == ok
+
+
+# -- Phase 3: new files -----------------------------------------------------------------
+def test_file_new_needs_no_open_file_and_never_overwrites():
+    import asyncio
+    from studio.server.app import ROOT, handle, scene_files
+    from studio.server.code.inserts import new_file_text
+    name = "zz_unit_new_file_check.py"
+    path = ROOT / name
+    assert not path.exists()
+    try:
+        r = asyncio.run(handle({"type": "file.new", "name": name}))
+        assert r == {"type": "file.created", "file": name, "scene": "ZzUnitNewFileCheck"}
+        assert path.read_bytes() == new_file_text("ZzUnitNewFileCheck").encode()
+        assert any(f["path"] == name for f in scene_files())
+        again = asyncio.run(handle({"type": "file.new", "name": name}))
+        assert again["type"] == "error" and "exists" in again["message"]
+    finally:
+        path.unlink(missing_ok=True)
+    for bad in ["../x.py", "studio/server/x.py", "studio/tests/tmp/x.py", "a b.py", "x.txt"]:
+        r = asyncio.run(handle({"type": "file.new", "name": bad}))
+        assert r["type"] == "error", bad
+    assert not any(f["path"].startswith("studio/tests/tmp/") for f in scene_files())

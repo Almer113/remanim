@@ -127,13 +127,22 @@ that was already right, plus the library-copy id fix (see below).
 
 ## 5. Not changed (open)
 
-- `@types/react` is not installed, so `tsc` can't type-check the UI; Vite
-  builds without type checks. Installing it needs your OK.
+- ~~`@types/react` not installed, no type check~~ **Done (approved):**
+  `@types/react` / `@types/react-dom` 19.3 in `studio/web`; `npm run build`
+  now runs `tsc --noEmit` first (strict mode; the only error was the CSS
+  import, fixed with `vite-env.d.ts`). `npm audit` reports 5 high issues in
+  Vite's own dev dependencies (picomatch, tinyglobby), present before this;
+  they affect the dev tooling, not the built page. Not changed.
+- ~~Preview server and studio side by side untested~~ **Done:** both servers
+  on the same folder and the same root scene file: 4 studio edits (3 new
+  `Text` strings, 1 wait) each followed by a preview re-render, then 3
+  editor saves with new `MathTex`. Every studio edit verified, every
+  preview render `ok`, no `WinError 32` / `PermissionError` in either log;
+  the studio reloaded after each save. (Separate LaTeX folders; the shared
+  `media/texts` cache caused no clash.)
 - A module-level `config.x = ...` in a scene file is undone by `tempconfig`
   (no file in this repo does it; `apply_background()` is only called inside
   scenes).
-- Running the preview server and the studio side by side on the same
-  folder is still untested (carried from Phase 2).
 - 3D frames are still 7–12 s cold (Phase 3 work).
 - Unseeded scenes are made deterministic but not yet flagged in the UI.
 

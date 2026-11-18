@@ -15,6 +15,15 @@ interface Props {
   f: number;
   onScreen: boolean;
   sendEdit: (msg: object) => void;
+  actions: { remove: () => void; duplicate: () => void; group: () => void; count: number };
+}
+
+/** Parse a typed number and run `go`; returns the reason when it isn't one. */
+function num(v: string, go: (n: number) => void | string): string | null {
+  const n = Number(v.trim());
+  if (!v.trim() || !Number.isFinite(n)) return "A number";
+  const r = go(n);
+  return typeof r === "string" ? r : null;
 }
 
 const BAD_VALUE = "Type a number (2, -0.5, 1e-3), a name (ACCENT, BLUE) or a \"string\"";
@@ -58,7 +67,7 @@ function Field({ label, value, onCommit, disabled, title }: {
   );
 }
 
-export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit }: Props) {
+export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, actions }: Props) {
   const [newProp, setNewProp] = useState("");
   const [newVal, setNewVal] = useState("");
   const [newErr, setNewErr] = useState<string | null>(null);
@@ -106,6 +115,8 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit }: Pr
             </select>
           </div>
         )}
+        <div className="btns-row"><button disabled={!!locked || busy} onClick={actions.remove}
+          title="Delete (Del)">Delete {sel.anim !== null ? "this animation" : c.kind === "wait" ? "pause" : "clip"}</button></div>
         {c.kind === "play" && !a && c.anims.length > 1 && (
           <div className="muted small-gap">{c.anims.length} animations in this play(). Select one on its row to edit it alone.</div>
         )}
@@ -131,7 +142,25 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit }: Pr
       <h3>{o.name ?? o.class} <small>{o.class}</small></h3>
       <div className="row"><label>Tier</label><span>{o.tier === 1 ? "1 · fully editable" : o.tier === 2 ? "2 · computed (≈)" : "3 · code only 🔒"}</span></div>
       <div className="row"><label>Made at</label><span className="mono">line {(o.site ?? o.user_site)?.[0]}{o.func && o.func !== "construct" ? ` in ${o.func}()` : ""}</span></div>
-      {o.center && <div className="row"><label>Position</label><span className="mono">x {o.center[0].toFixed(2)} · y {o.center[1].toFixed(2)}</span></div>}
+      {o.center && (locked || off || busy) && <div className="row"><label>Position</label><span className="mono">x {o.center[0].toFixed(2)} · y {o.center[1].toFixed(2)}</span></div>}
+      {o.center && !locked && !off && !busy && (
+        <>
+          <Field label="x" value={o.center[0].toFixed(2)} title="Where its centre is; Enter writes the move into the code"
+            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.move", object: o, f, dx: n - o.center![0], dy: 0 }))} />
+          <Field label="y" value={o.center[1].toFixed(2)}
+            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.move", object: o, f, dx: 0, dy: n - o.center![1] }))} />
+          <Field label="scale ×" value="1" title="Scale about its centre, e.g. 1.5"
+            onCommit={(v) => num(v, (n) => n > 0 ? sendEdit({ type: "edit.scale", object: o, f, k: n }) : "more than 0")} />
+          <Field label="turn °" value="0" title="Turn anticlockwise by this many degrees"
+            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.rotate", object: o, f, deg: n }))} />
+        </>
+      )}
+      <div className="btns-row">
+        <button disabled={!!locked || busy || off || !!o.virtual} onClick={actions.duplicate} title="Duplicate (Ctrl+D)">Duplicate</button>
+        <button disabled={busy || off || actions.count < 2} onClick={actions.group}
+          title="Group the selection (Ctrl+G); Shift-click to add objects">Group{actions.count > 1 ? ` ${actions.count}` : ""}</button>
+        <button disabled={!!locked || busy} onClick={actions.remove} title="Delete (Del)">Delete</button>
+      </div>
       {o.color && <div className="row"><label>Colour now</label><span><span className="swatch" style={{ background: o.color }} /> {o.color}</span></div>}
       {locked && <div className="note">🔒 {locked}</div>}
       {!locked && off && <div className="note">Not on screen at this frame: move the playhead to where it shows to edit it.</div>}

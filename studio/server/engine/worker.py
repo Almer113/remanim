@@ -48,6 +48,19 @@ def _boxes(idmap, n: int) -> list:
     return out
 
 
+def _group_boxes(objects: list) -> None:
+    """A group drawn only through its parts gets the union of their boxes."""
+    for _ in range(6):  # nested groups: children first
+        for o in objects:
+            if not o.get("virtual"):
+                continue
+            kids = [k["box"] for k in objects if k.get("parent") is not None
+                    and objects[k["parent"]] is o and k.get("box")]
+            if kids:
+                o["box"] = [min(b[0] for b in kids), min(b[1] for b in kids),
+                            max(b[2] for b in kids), max(b[3] for b in kids)]
+
+
 class Worker:
     def __init__(self, path: str, quality: str):
         from .runtime import install
@@ -70,7 +83,9 @@ class Worker:
             self.engine = None
         self.engine = Engine(self.path, msg["data"], self.quality)
         w, h = self.engine.size
-        return {"scenes": self.engine.scenes(), "fps": self.engine.fps, "width": w, "height": h}
+        fw, fh = self.engine.frame_units
+        return {"scenes": self.engine.scenes(), "fps": self.engine.fps, "width": w, "height": h,
+                "frame_width": fw, "frame_height": fh}
 
     def op_trace(self, msg):
         if self.engine is None:
@@ -101,6 +116,7 @@ class Worker:
             boxes = _boxes(c.idmap, len(c.objects))
             for o, b in zip(c.objects, boxes):
                 o["box"] = b
+            _group_boxes(c.objects)
             out["objects"] = c.objects
         return out
 
@@ -113,12 +129,17 @@ class Worker:
         except EngineError as e:
             return {"error": {"message": str(e), "line": e.line}}
         try:
-            out = {"trace": eng.trace(msg["scene"])}
-            if msg.get("object") and out["trace"]["error"] is None:
-                t = msg["f"] / eng.fps + 1e-4
-                c = eng.frame(msg["scene"], t, True)
-                out["object"] = next((o for o in c.objects if o["id"] == msg["object"]), None)
-                out["objects"] = c.objects
+            if msg.get("object") or msg.get("objects"):
+                # one run: the whole trace, and the objects at f on the way
+                t = max(0, int(msg["f"])) / eng.fps + 1e-4
+                tr, c = eng.trace(msg["scene"], t, True)
+                out = {"trace": tr}
+                if tr["error"] is None and c is not None:
+                    _group_boxes(c.objects)
+                    out["object"] = next((o for o in c.objects if o["id"] == msg.get("object")), None)
+                    out["objects"] = c.objects
+            else:
+                out = {"trace": eng.trace(msg["scene"])}
             if msg.get("eval_name"):
                 from .runtime import _hex
                 try:

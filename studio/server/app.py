@@ -16,6 +16,7 @@ from .project import ROOT, Document, rel
 WEB = ROOT / "studio" / "web" / "dist"
 SKIP_DIRS = {".venv", "media", "node_modules", ".git", "studio/server", "studio/spikes", "studio/web",
              "__pycache__", ".claude"}
+HIDDEN_DIRS = {"studio/tests/tmp"}  # copies the tests make: openable, but not listed
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 DEV_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}  # `npm run dev` (vite proxy)
 
@@ -69,7 +70,8 @@ def scene_files() -> list[dict]:
         here = Path(dirpath)
         r_here = "" if here == ROOT else rel(here)
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS
-                             and (f"{r_here}/{d}" if r_here else d) not in SKIP_DIRS and not d.startswith("."))
+                             and (f"{r_here}/{d}" if r_here else d) not in SKIP_DIRS | HIDDEN_DIRS
+                             and not d.startswith("."))
         paths += [here / f for f in filenames if f.endswith(".py")]
     for p in sorted(paths, key=lambda x: rel(x)):
         r = rel(p)
@@ -234,11 +236,43 @@ async def ws_handler(req):
     return ws
 
 
+async def new_file(msg: dict) -> dict:
+    """A new scene file from the code_spec §6 template; never overwrites."""
+    import re
+    from .code.inserts import new_file_text
+    from .code.splice import EditError, write_atomic
+    name = str(msg.get("name") or "").strip().replace("\\", "/")
+    if not re.fullmatch(r"[A-Za-z_][\w-]*(/[A-Za-z_][\w-]*)*\.py", name) or ".." in name:
+        return {"type": "error", "message": "a file name like my_scene.py (letters, digits, _ and -)"}
+    path = (ROOT / name).resolve()
+    if ROOT not in path.parents:
+        return {"type": "error", "message": "not inside the project"}
+    parts = rel(path).split("/")[:-1]
+    if any(p in SKIP_DIRS or p.startswith(".") or "/".join(parts[: i + 1]) in SKIP_DIRS | HIDDEN_DIRS
+           for i, p in enumerate(parts)):
+        return {"type": "error", "message": "that folder holds tools, not scenes"}
+    if path.exists():
+        return {"type": "error", "message": f"{name} already exists"}
+    scene = str(msg.get("scene") or "") or "".join(w.capitalize() for w in re.split(r"[_\W]+", path.stem) if w) \
+        or "NewScene"
+    if not scene[0].isalpha():
+        scene = "Scene" + scene
+    try:
+        text = new_file_text(scene)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, text.encode("utf-8"))
+    except (EditError, OSError) as e:
+        return {"type": "error", "message": str(e)}
+    return {"type": "file.created", "file": rel(path), "scene": scene}
+
+
 async def handle(msg: dict) -> dict | None:
     t = msg.get("type")
     if t == "open":
         await hub.open(msg["file"])
         return None
+    if t == "file.new":  # needs no open file
+        return await new_file(msg)
     doc = hub.docs.get(msg.get("file", ""))
     if doc is None:
         return {"type": "error", "message": "file not open"}
@@ -246,7 +280,8 @@ async def handle(msg: dict) -> dict | None:
         await doc.activate(msg["scene"])
         await doc.send_model()
         return None
-    if t in ("edit.timing", "edit.prop"):
+    if t in ("edit.timing", "edit.prop", "edit.move", "edit.scale", "edit.rotate", "edit.insert",
+             "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip"):
         return await doc.edit(msg)
     if t == "edit.confirm":
         return await doc.confirm(msg["token"])

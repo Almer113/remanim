@@ -53,7 +53,52 @@ simpler shape. Where they differ, this list is what the code does.
 - `/api/status` also reports `threads` (worker threads, for leak checks).
 - **Cursors are threads inside each file's worker process** (one process per
   open file), not separate processes. Not built yet: `/audio`, `/source`
-  (the model carries `source`), `render`, `edit.move` and later edits.
+  (the model carries `source`) and `render`.
+
+## Added in Phase 3 (direct manipulation)
+
+Every edit below sends `file`, `scene`, `rev` and a `seq`, and gets the same
+replies as `edit.prop`: `edit.done`, `edit.refused {reason}` or
+`edit.preview {token, summary, why, diff}` (confirm with `edit.confirm`).
+Objects are sent whole, as `/objects` returned them; `f` is the frame the
+user looked at.
+
+```jsonc
+{"type": "edit.move",   "object": {...}, "f": 30, "dx": 1.5, "dy": -0.5}   // scene units
+{"type": "edit.scale",  "object": {...}, "f": 30, "k": 1.5, "about": null}  // about: optional edge name
+{"type": "edit.rotate", "object": {...}, "f": 30, "deg": 30}                // anticlockwise
+{"type": "edit.insert", "class": "Square", "x": -2, "y": 0, "f": 15,
+                        "entrance": "Create", "region": "title"}            // entrance, region optional
+{"type": "edit.preset", "object": {...}, "preset": "Indicate", "f": 45}
+{"type": "edit.duplicate", "object": {...}, "f": 60}
+{"type": "edit.group",  "objects": [{...}, {...}], "f": 60}
+{"type": "edit.delete", "object": {...}, "f": 60}
+{"type": "edit.delete_clip", "clip": 3, "anim": null}                       // anim: one animation of a play()
+{"type": "file.new", "name": "my_scene.py", "scene": "MyScene"}            // scene optional; no open file needed
+```
+
+- `edit.move` / `scale` / `rotate` are refused while the object (or a group
+  it is in) is animating at `f`. Every candidate edit is replayed and
+  measured (centre within 0.011, reference point within 0.022, size for
+  scale); the first that lands is written. `edit.preview` for these also
+  carries `also_moves` (names of other objects the edit moves).
+- `edit.insert` classes: Circle, Square, Rectangle, Triangle,
+  RegularPolygon, Star, Dot, Line, Arrow, Text, MathTex, Blob (adds
+  `from manim_kit import *`). Presets: Indicate, Circumscribe, Wiggle,
+  Flash, ApplyWave, FocusOn, FadeOut, Uncreate, ShrinkToCenter. A drop during
+  a `play()` starts after it; in a sequential scene a literal `wait()` is
+  split so later clips keep their times.
+- `edit.delete` removes the creating statement and the statements that only
+  use the object; it is refused (naming the line) when other code reads it.
+- `file.new` → `{"type": "file.created", "file", "scene"}`, or `error`. It
+  never overwrites, and only writes where the file list would show the file.
+- `/objects` entries gain `center`, `size`, `p0` (scene units),
+  `placement` (what the planner needs), and for groups the user made
+  (`VGroup(a, b)`) a `virtual: true` entry after the drawn ones; drawn
+  objects inside it carry `parent` (an index into the same list). The
+  model gains `frame_width` / `frame_height` (scene units).
+- Files under `studio/tests/tmp/` (test copies) open by name but are not
+  in `/api/files`.
 
 ## HTTP
 
