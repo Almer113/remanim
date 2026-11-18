@@ -1,0 +1,107 @@
+"""manim-voiceover speech service backed by Microsoft Edge's free neural voices.
+
+manim-voiceover 0.4.0 has no Edge TTS backend, so this adapter provides one.
+It uses the `edge-tts` package; there's no API key or account, but the
+narration text is sent to Microsoft's online service. Results are cached in
+media/voiceovers, so a voice line is only synthesised again when its text,
+voice or rate changes.
+
+Word timings from Edge are passed on as manim-voiceover "word boundaries", so
+`<bookmark mark="X"/>` tags and `tracker.time_until_bookmark("X")` work.
+
+    from edge_tts_service import EdgeTTSService
+    self.set_speech_service(EdgeTTSService(voice="en-US-AndrewNeural"))
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from pathlib import Path
+
+import edge_tts
+from manim_voiceover.helper import remove_bookmarks
+from manim_voiceover.services.base import SpeechService, initialize_speech_service, path_to_string
+
+
+class EdgeTTSService(SpeechService):
+    def __init__(self, voice: str = "en-US-AndrewNeural", rate: str = "+0%",
+                 pitch: str = "+0Hz", **kwargs) -> None:
+        """
+        voice: any Edge neural voice (list them with `edge-tts --list-voices`).
+        rate:  speaking speed, e.g. "-10%" for slower, "+10%" for faster.
+        """
+        initialize_speech_service(self, kwargs)
+        self.voice, self.rate, self.pitch = voice, rate, pitch
+
+    def generate_from_text(self, text: str, cache_dir=None, path=None, **kwargs) -> dict:
+        cache_dir = Path(cache_dir or self.cache_dir)
+        input_text = remove_bookmarks(text)
+        input_data = {"input_text": input_text, "service": "edge-tts",
+                      "voice": self.voice, "rate": self.rate, "pitch": self.pitch}
+
+        cached = self.get_cached_result(input_data, cache_dir)
+        if cached is not None:
+            return cached
+
+        audio_path = path_to_string(path) if path else self.get_audio_basename(input_data) + ".mp3"
+        audio, words = self._synthesise(input_text)
+        (cache_dir / audio_path).write_bytes(audio)
+
+        return {
+            "input_text": text,
+            "input_data": input_data,
+            "original_audio": audio_path,
+            "word_boundaries": _to_word_boundaries(input_text, words),
+        }
+
+    # A stalled connection once hung a run for two hours despite edge-tts's own
+    # timeouts, so each attempt gets a hard deadline and a few retries.
+    TIMEOUT_S, ATTEMPTS = 45, 4
+
+    def _synthesise(self, text: str) -> tuple[bytes, list[dict]]:
+        async def once():
+            comm = edge_tts.Communicate(text, self.voice, rate=self.rate, pitch=self.pitch,
+                                        boundary="WordBoundary", connect_timeout=10,
+                                        receive_timeout=30)
+            audio, words = bytearray(), []
+            async for chunk in comm.stream():
+                if chunk["type"] == "audio":
+                    audio.extend(chunk["data"])
+                elif chunk["type"] == "WordBoundary":
+                    words.append(chunk)
+            return bytes(audio), words
+
+        last_err = None
+        for attempt in range(self.ATTEMPTS):
+            try:
+                audio, words = asyncio.run(asyncio.wait_for(once(), self.TIMEOUT_S))
+                if audio:
+                    return audio, words
+                last_err = RuntimeError("Edge TTS returned no audio")
+            except Exception as e:  # timeout, network error, service hiccup
+                last_err = e
+            print(f"[edge-tts] attempt {attempt + 1} failed ({last_err!r}); retrying", flush=True)
+        raise RuntimeError(f"Edge TTS failed {self.ATTEMPTS} times. Are you online? {last_err!r}")
+
+
+def _to_word_boundaries(text: str, words: list[dict]) -> list[dict]:
+    """Map Edge's word events (offsets in 100 ns ticks, same unit manim-voiceover
+    uses) to character offsets in `text`."""
+    out, pos = [], 0
+    for w in words:
+        word = w["text"]
+        m = re.search(re.escape(word), text[pos:])
+        if m is None:  # Edge may normalise a token (e.g. numbers); skip it
+            continue
+        start = pos + m.start()
+        out.append({
+            "audio_offset": int(w["offset"]),
+            "duration_milliseconds": int(w["duration"] / 10_000),
+            "text_offset": start,
+            "word_length": len(word),
+            "text": word,
+            "boundary_type": "Word",
+        })
+        pos = start + len(word)
+    return out

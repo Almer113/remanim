@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Rendered output and caches (large, regenerable)
+media/
+
+# Downloaded third-party reference material (not ours to publish)
+reference/
+
+# Node (studio web UI, later)
+node_modules/
+dist/
+
+# Local app settings
+.claude/settings.local.json

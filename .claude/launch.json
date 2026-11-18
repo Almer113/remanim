@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "manim-preview",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["preview_server.py"],
+      "port": 8765
+    }
+  ]
+}
