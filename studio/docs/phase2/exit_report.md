@@ -35,9 +35,10 @@ section 5 carried into Phase 3.
 Refusals, all correct behaviour:
 - `order_matters.py` colour of `eq`: the next lines recolour `eq[0]` and
   `eq[4]`, so "something later sets it again" is true.
-- `pythagoras.py` and gallery `basic_concepts.py`: the test asked for
-  `fill_opacity` above 1; Manim clamps it and the check caught the mismatch.
-  (The test now keeps opacities in range.)
+- `pythagoras.py` and gallery `basic_concepts.py`: refused because
+  `fill_opacity` read back as 1. **Correction (review, same day):** this was
+  a bug, not the test: painting the ID map overwrote `fill_opacity` on the
+  live objects. Fixed; see [review_phase2.md](../review_phase2.md).
 - awkward `dynamic.py`: the test asked for `num_decimal_places=1.35`; the
   edited scene crashed in verification and nothing was written. (The test
   now keeps whole numbers whole.)

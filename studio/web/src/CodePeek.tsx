@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 import type { DiffHunk, Span } from "./types";
 
 /** The code behind the selection, with the last edit highlighted. */
-export function CodePeek({ source, span, diff, file }: { source: string; span: Span | null; diff: DiffHunk[] | null; file: string }) {
-  const lines = source.split(/\r?\n/);
+// memo: re-renders only when the code, selection or diff changes, not on every playback frame
+export const CodePeek = memo(function CodePeek({ source, span, diff, file }: { source: string; span: Span | null; diff: DiffHunk[] | null; file: string }) {
+  const lines = useMemo(() => source.split(/\r?\n/), [source]);
   const box = useRef<HTMLDivElement>(null);
   const added = new Set<number>();
   for (const h of diff ?? []) h.after.forEach((_, j) => added.add(h.line + j));
@@ -29,4 +30,4 @@ export function CodePeek({ source, span, diff, file }: { source: string; span: S
       </div>
     </div>
   );
-}
+});

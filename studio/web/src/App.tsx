@@ -24,7 +24,8 @@ export function App() {
   const [f, setF] = useState(0);
   const [rest, setRest] = useState(true);
   const [playing, setPlaying] = useState(false);
-  const [objects, setObjects] = useState<Obj[]>([]);
+  // objects belong to one frame of one revision; anything else is stale
+  const [objs, setObjs] = useState<{ key: string; list: Obj[] }>({ key: "", list: [] });
   const [sel, setSel] = useState<Selection>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -38,14 +39,29 @@ export function App() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "bad" ? 9000 : 4500);
   }, []);
 
+  // what the server should have open; re-sent after every reconnect
+  const fileRef = useRef(file);
+  const sceneRef = useRef<string | null>(null);
+  fileRef.current = file;
+  sceneRef.current = sceneName;
+
   // -- connection and file list ------------------------------------------------
   useEffect(() => {
     conn.onStatus = setUp;
+    let first = true;
+    conn.onOpen = () => {
+      if (!first) fetch("/api/files").then((r) => r.json()).then(setFiles).catch(() => {});
+      first = false;
+      if (fileRef.current) {
+        conn.send({ type: "open", file: fileRef.current });
+        if (sceneRef.current) conn.send({ type: "scene", file: fileRef.current, scene: sceneRef.current });
+      }
+    };
     conn.connect();
     fetch("/api/files").then((r) => r.json()).then(setFiles).catch(() => {});
     return conn.on((m) => {
       if (m.type === "model") {
-        setModel((old) => (m.file === (old?.file ?? m.file) || !old ? m : old));
+        if (m.file === fileRef.current) setModel(m);  // other files' models are for other tabs
       } else if (m.type === "file.changed") {
         toast("info", `${m.file} changed outside the studio; reloaded`);
       } else if (m.type === "error") {
@@ -59,10 +75,12 @@ export function App() {
     localStorageSet("studio.file", file);
     setModel(null);
     setSel(null);
-    setObjects([]);
+    setSceneName(null);
+    setStatus({});
     setF(0);
-    conn.send({ type: "open", file });
-  }, [file]);
+    // on the very first connect, onOpen sends this
+    if (up) conn.send({ type: "open", file });
+  }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const scene: SceneModel | null = useMemo(() => {
     if (!model) return null;
@@ -72,6 +90,9 @@ export function App() {
 
   const nFrames = scene && !scene.pending ? Math.max(1, scene.frames) : 1;
   const fps = model?.fps ?? 15;
+  const session = model?.session ?? "";
+  const frameKey = model && scene ? `${model.session}|${model.rev}|${scene.name}|${f}` : "";
+  const objects = objs.key === frameKey ? objs.list : [];
 
   useEffect(() => {
     if (f > nFrames - 1) setF(nFrames - 1);
@@ -88,37 +109,51 @@ export function App() {
   useEffect(() => {
     if (!model || !scene || scene.pending || !rest || playing) return;
     let gone = false;
+    const key = frameKey;
     const t = setTimeout(() => {
-      fetch(`/objects?${query(model.file, scene.name, model.rev, f)}`)
+      fetch(`/objects?${query(model.file, scene.name, model.rev, f, session)}`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (!gone && d && d.objects) setObjects(d.objects);
+          if (!gone) setObjs({ key, list: d && d.objects ? d.objects : [] });
         })
-        .catch(() => {});
+        .catch(() => { if (!gone) setObjs({ key, list: [] }); });
     }, 60);
     return () => {
       gone = true;
       clearTimeout(t);
     };
-  }, [model?.file, model?.rev, scene?.name, scene?.pending, f, rest, playing]);
+  }, [frameKey, rest, playing]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // keep the selected object fresh after a reload (ids survive edits)
+  // keep the selected object fresh after a reload (ids survive edits); an
+  // object that isn't on screen at this frame stays selected but can't be edited
+  const selOnScreen = sel?.kind === "object" && objs.key === frameKey && objects.some((x) => x.id === sel.obj.id);
   useEffect(() => {
-    if (sel?.kind === "object") {
+    if (sel?.kind === "object" && objs.key === frameKey) {
       const o = objects.find((x) => x.id === sel.obj.id);
       if (o && o !== sel.obj) setSel({ kind: "object", obj: o });
     }
-  }, [objects]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [objs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // -- engine status ---------------------------------------------------------------
   useEffect(() => {
     if (!model) return;
+    let inFlight = false, gone = false;
     const id = setInterval(() => {
+      if (inFlight) return;  // the worker is busy; don't pile up requests
+      inFlight = true;
       fetch(`/api/status?file=${encodeURIComponent(model.file)}`)
-        .then((r) => r.json()).then(setStatus).catch(() => {});
+        .then((r) => r.json()).then((s) => { if (!gone) setStatus(s); }).catch(() => {})
+        .finally(() => { inFlight = false; });
     }, 2000);
-    return () => clearInterval(id);
+    return () => { gone = true; clearInterval(id); };
   }, [model?.file]);
+
+  const selectedClip: Clip | null = sel?.kind === "clip" && scene && !scene.pending ? scene.clips[sel.clip] ?? null : null;
+  const peekSpan = sel?.kind === "object" ? (sel.obj.site ?? sel.obj.user_site)
+    : selectedClip ? selectedClip.call : null;
+  const err = model?.error ?? scene?.error ?? null;
+  const ready = !!(model && scene && !scene.pending);
+  const time = (f / fps).toFixed(2);
 
   // -- playback ----------------------------------------------------------------------
   const playRef = useRef<{ t0: number; f0: number } | null>(null);
@@ -149,13 +184,21 @@ export function App() {
     setRest(atRest);
   }, [nFrames]);
 
+  // pausing puts the playhead at rest: full frame, ID map and objects again
+  const togglePlay = useCallback(() => {
+    if (playing) setRest(true);
+    setPlaying(!playing);
+  }, [playing]);
+
   // -- edits -------------------------------------------------------------------------
+  const diffTimer = useRef<number | undefined>(undefined);
   const handleReply = useCallback((r: any) => {
     setBusy(false);
     if (r.type === "edit.done") {
       toast("ok", `✓ ${r.summary} · verified`);
       setLastDiff(r.diff);
-      setTimeout(() => setLastDiff(null), 6000);
+      clearTimeout(diffTimer.current);
+      diffTimer.current = window.setTimeout(() => setLastDiff(null), 6000);
     } else if (r.type === "edit.refused") {
       toast("bad", `✗ Not changed: ${r.reason}`);
     } else if (r.type === "edit.preview") {
@@ -172,19 +215,20 @@ export function App() {
   }, [model, scene, handleReply]);
 
   const undoRedo = useCallback((which: "undo" | "redo") => {
-    if (!model) return;
+    if (!model || busy || preview || !(which === "undo" ? model.undo : model.redo)) return;
     setBusy(true);
     conn.request({ type: which, file: model.file }).then(handleReply);
-  }, [model, handleReply]);
+  }, [model, busy, preview, handleReply]);
 
   // -- keyboard ------------------------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      if (preview) return;  // the confirm dialog is open
       if (e.key === " ") {
         e.preventDefault();
-        setPlaying((p) => !p);
+        if (ready) togglePlay();
       } else if (e.key === "ArrowLeft") {
         seek(f - (e.shiftKey ? fps : 1), true);
       } else if (e.key === "ArrowRight") {
@@ -198,15 +242,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [f, fps, seek, undoRedo]);
-
-  // -- layout ------------------------------------------------------------------------------
-  const selectedClip: Clip | null = sel?.kind === "clip" && scene ? scene.clips[sel.clip] ?? null : null;
-  const peekSpan = sel?.kind === "object" ? (sel.obj.site ?? sel.obj.user_site)
-    : selectedClip ? selectedClip.call : null;
-  const err = model?.error ?? scene?.error ?? null;
-  const ready = model && scene && !scene.pending;
-  const time = (f / fps).toFixed(2);
+  }, [f, fps, seek, undoRedo, togglePlay, preview, ready]);
 
   return (
     <div className="app">
@@ -257,8 +293,8 @@ export function App() {
           <section className="stage">
             {model && scene && !scene.pending ? (
               <Canvas
-                url={frameUrl(model.file, scene.name, model.rev, f, rest && !playing)}
-                idmapUrl={rest && !playing ? `/idmap?${query(model.file, scene.name, model.rev, f)}` : null}
+                url={frameUrl(model.file, scene.name, model.rev, f, rest && !playing, session)}
+                idmapUrl={rest && !playing ? `/idmap?${query(model.file, scene.name, model.rev, f, session)}` : null}
                 width={model.width} height={model.height}
                 objects={rest && !playing ? objects : []}
                 selected={sel?.kind === "object" ? sel.obj.id : null}
@@ -270,8 +306,8 @@ export function App() {
             )}
             <div className="transport">
               <button onClick={() => seek(0, true)} title="Start">⏮</button>
-              <button onClick={() => setPlaying((p) => !p)} disabled={!ready} title="Play / pause (Space)">{playing ? "⏸" : "▶"}</button>
-              <span className="mono">{time} / {scene ? scene.duration.toFixed(2) : "0.00"} s · frame {f}</span>
+              <button onClick={togglePlay} disabled={!ready} title="Play / pause (Space)">{playing ? "⏸" : "▶"}</button>
+              <span className="mono">{time} / {scene && !scene.pending ? scene.duration.toFixed(2) : "…"} s · frame {f}</span>
               {scene?.target ? <span className="muted">TARGET {scene.target} s</span> : null}
               <span className="muted">{fps} fps</span>
             </div>
@@ -279,7 +315,8 @@ export function App() {
           </section>
 
           <aside className="panel inspector">
-            <Inspector sel={sel} scene={scene} model={model} busy={busy} f={f} sendEdit={sendEdit} />
+            <Inspector sel={sel} scene={scene && !scene.pending ? scene : null} model={model} busy={busy} f={f}
+              onScreen={sel?.kind !== "object" || selOnScreen} sendEdit={sendEdit} />
           </aside>
 
           <section className="timeline-wrap">

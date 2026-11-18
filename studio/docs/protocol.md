@@ -38,6 +38,19 @@ simpler shape. Where they differ, this list is what the code does.
   `{"default": true}` (remove the keyword).
 - **Requests with `seq`** get the reply with the same `seq`; that is how the
   client pairs `edit.*` replies. `model` and `file.changed` are pushed.
+- **Local only** (review after Phase 2): every request needs a local `Host`
+  (`127.0.0.1`, `localhost`, `[::1]`), and a browser `Origin` must be this
+  server under either local name, or the Vite dev server on 5173. Values
+  written as code (`rate_func`, `{"name"}`) must be Python names; property
+  names must be identifiers.
+- **`session`** in every `model` changes with each server run; the client
+  adds it to frame, ID-map and objects URLs as `s=` so the browser never
+  shows a frame cached from an earlier run (revisions restart at 1).
+- **`edit.done`** comes once the active scene is traced again; the other
+  scenes follow in later `model` pushes. A preview (`edit.preview`) is
+  refused on confirm if the file changed after it was planned. After every
+  reconnect the client sends `open` (and `scene`) again.
+- `/api/status` also reports `threads` (worker threads, for leak checks).
 - **Cursors are threads inside each file's worker process** (one process per
   open file), not separate processes. Not built yet: `/audio`, `/source`
   (the model carries `source`), `render`, `edit.move` and later edits.

@@ -10,6 +10,8 @@ reason, which the UI shows as is.
 from __future__ import annotations
 
 import ast
+import keyword
+import re
 from dataclasses import dataclass, field
 
 from .source import Source, Span
@@ -32,6 +34,38 @@ def _call(src: Source, span: list | Span, what: str) -> ast.Call:
     return call
 
 
+NAME = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
+
+
+def _name_or_refuse(value, what: str) -> str:
+    """A (dotted) Python name and nothing else: values sent by the UI are
+    written into the file as code, so anything else is refused."""
+    v = str(value).strip()
+    if not NAME.fullmatch(v) or any(keyword.iskeyword(p) for p in v.split(".")):
+        raise EditError(f"not a {what}: {value!r}")
+    return v
+
+
+def _loop_around(src: Source, node):
+    """The loop or comprehension inside the same function that repeats `node`."""
+    n = src.parent(node)
+    while n is not None and not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                                               ast.ClassDef, ast.Module)):
+        if isinstance(n, (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.SetComp,
+                          ast.DictComp, ast.GeneratorExp)):
+            return n
+        n = src.parent(n)
+    return None
+
+
+def _confirm_loop(src: Source, call, plan: "Plan") -> "Plan":
+    loop = _loop_around(src, call)
+    if loop is not None and plan.confirm is None:
+        plan.confirm = (f"line {call.lineno} runs inside the loop at line {loop.lineno}: "
+                        "this changes it for every pass of the loop")
+    return plan
+
+
 def _literal_or_refuse(src: Source, node, what: str):
     v = number_of(node)
     if v is None:
@@ -52,19 +86,25 @@ def plan_timing(src: Source, clip: dict, field_: str, value) -> Plan:
         raise EditError(f"this {clip['kind']} is inside the helper {clip.get('func')}(); "
                         "editing it would change every use")
     name = clip.get("call_name")
+    plan = None
     if field_ == "duration":
-        value = float(value)
-        if value <= 0:
-            raise EditError("a duration must be more than 0 (Manim can't render wait(0))")
+        try:
+            value = round(float(value), 4)
+        except (TypeError, ValueError):
+            raise EditError(f"not a number: {value!r}") from None
+        if not 0 < value < float("inf"):
+            raise EditError("a duration must be a number more than 0 (Manim can't render wait(0))")
         if clip["kind"] == "wait":
-            return _wait_duration(src, clip, name, value)
-        if clip["kind"] == "play":
-            return _play_runtime(src, clip, value)
-        if clip["kind"] == "anim":
-            return _anim_runtime(src, clip, value)
-    if field_ == "rate_func":
-        return _rate_func(src, clip, str(value))
-    raise EditError(f"{field_} can't be edited on a {clip['kind']} clip yet")
+            plan = _wait_duration(src, clip, name, value)
+        elif clip["kind"] == "play":
+            plan = _play_runtime(src, clip, value)
+        elif clip["kind"] == "anim":
+            plan = _anim_runtime(src, clip, value)
+    elif field_ == "rate_func":
+        plan = _rate_func(src, clip, _name_or_refuse(value, "rate function"))
+    if plan is None:
+        raise EditError(f"{field_} can't be edited on a {clip['kind']} clip yet")
+    return _confirm_loop(src, _call(src, clip["call"], name or "play"), plan)
 
 
 def _wait_duration(src, clip, name, value) -> Plan:
@@ -72,7 +112,7 @@ def _wait_duration(src, clip, name, value) -> Plan:
     if name == "at":
         if not call.args:
             raise EditError("at() without a time")
-        new_t = clip["start"] + value
+        new_t = round(clip["start"] + value, 2)  # an absolute time: keep it readable
         old = _literal_or_refuse(src, call.args[0], "the at() time")
         return Plan([set_number(src, call.args[0], new_t)],
                     f"self.at({fmt(old)}) → self.at({fmt(new_t)})",
@@ -83,7 +123,11 @@ def _wait_duration(src, clip, name, value) -> Plan:
     kw = Source.keyword(call, "duration")
     node = node if node is not None else (kw.value if kw else None)
     if node is None:
-        # bare self.wait(): its default is 1 s
+        # self.wait() or self.wait(frozen_frame=...): the default is 1 s
+        if call.keywords:
+            at, _ = src.span(min(call.keywords, key=lambda k: (k.lineno, k.col_offset)))
+            return Plan([Edit(at, at, f"{fmt(value)}, ")], f"wait time {fmt(value)} added",
+                        checks={"duration": value})
         end = src.offset(call.end_lineno, call.end_col_offset) - 1
         return Plan([Edit(end, end, fmt(value))], f"self.wait() → self.wait({fmt(value)})",
                     checks={"duration": value})
@@ -102,7 +146,7 @@ def _play_runtime(src, clip, value) -> Plan:
                     checks={"duration": value})
     anims = _anim_args(call)
     if anims is not None and len(anims) == 1:
-        inner = _anim_call(anims[0])
+        inner = _anim_call(anims[0]) or _animate_call(anims[0])
         if inner is not None and Source.keyword(inner, "run_time") is not None:
             k = Source.keyword(inner, "run_time")
             _literal_or_refuse(src, k.value, "run_time")
@@ -137,6 +181,17 @@ def _anim_runtime(src, clip, value) -> Plan:
         return Plan([set_keyword(src, inner, "run_time", fmt(value))],
                     f"run_time={fmt(value)} added to {Source.call_name(inner)}()",
                     checks={"duration": value})
+    ac = _animate_call(expr)
+    if ac is not None:
+        # x.animate(rate_func=...).shift(...): run_time belongs in animate(...)
+        k = Source.keyword(ac, "run_time")
+        if k is not None:
+            _literal_or_refuse(src, k.value, "run_time")
+            return Plan([set_number(src, k.value, value)],
+                        f"run_time={src.text(k.value)} → {fmt(value, src.text(k.value))}",
+                        checks={"duration": value})
+        return Plan([set_keyword(src, ac, "run_time", fmt(value))],
+                    f"run_time={fmt(value)} added to .animate()", checks={"duration": value})
     builder = _animate_attr(expr)
     if builder is not None:
         # x.animate.shift(...) -> x.animate(run_time=v).shift(...)
@@ -178,8 +233,18 @@ def _anim_args(call: ast.Call):
 
 def _anim_call(expr):
     """`FadeIn(x, ...)` -> that Call; `x.animate...` -> None."""
-    if isinstance(expr, ast.Call) and _animate_attr(expr) is None:
+    if isinstance(expr, ast.Call) and _animate_attr(expr) is None and _animate_call(expr) is None:
         return expr
+    return None
+
+
+def _animate_call(expr):
+    """The `x.animate(...)` call in a builder chain, if the chain has one."""
+    n = expr
+    while isinstance(n, (ast.Call, ast.Attribute)):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "animate":
+            return n
+        n = n.func if isinstance(n, ast.Call) else n.value
     return None
 
 
@@ -204,7 +269,10 @@ def plan_property(src: Source, obj: dict, prop: str, value: dict) -> Plan:
         raise EditError("the file doesn't parse")
     if obj.get("site") is None:
         raise EditError("this object isn't made by a call in the scene file")
-    call = _call(src, obj["site"], obj.get("class", "constructor"))
+    prop = str(prop)
+    if not prop.isidentifier() or keyword.iskeyword(prop):
+        raise EditError(f"not a property name: {prop!r}")
+    call =_call(src, obj["site"], obj.get("class", "constructor"))
     kw = Source.keyword(call, prop)
     node = kw.value if kw is not None else None
     if node is None and prop in (obj.get("params") or []):
@@ -223,22 +291,30 @@ def plan_property(src: Source, obj: dict, prop: str, value: dict) -> Plan:
                     confirm, checks={"prop": prop})
     text = _value_text(src, node, value)
     if node is not None:
+        if confirm is None and number_of(node) is None and \
+                not isinstance(node, (ast.Constant, ast.Name, ast.Attribute)):
+            confirm = f"{prop} is computed here ({src.text(node)[:60]}); this replaces it with {text}"
         a, b = src.span(node)
-        return Plan([Edit(a, b, text)], f"{prop}: {src.text(node)} → {text}", confirm,
+        plan = Plan([Edit(a, b, text)], f"{prop}: {src.text(node)} → {text}", confirm,
                     checks={"prop": prop, "value": value})
-    return Plan([set_keyword(src, call, prop, text)], f"{prop}={text} added", confirm,
-                checks={"prop": prop, "value": value})
+    else:
+        plan = Plan([set_keyword(src, call, prop, text)], f"{prop}={text} added", confirm,
+                    checks={"prop": prop, "value": value})
+    return _confirm_loop(src, call, plan)
 
 
 def _value_text(src, node, value: dict) -> str:
     if "number" in value:
+        try:
+            n = float(value["number"])
+        except (TypeError, ValueError):
+            raise EditError(f"not a number: {value['number']!r}") from None
+        if not -float("inf") < n < float("inf"):
+            raise EditError("not a finite number")
         like = src.text(node) if node is not None and number_of(node) is not None else None
-        return fmt(value["number"], like)
+        return fmt(n, like)
     if "name" in value:
-        name = str(value["name"])
-        if not name.replace("_", "").replace(".", "").isalnum():
-            raise EditError(f"not a name: {name!r}")
-        return name
+        return _name_or_refuse(value["name"], "name")
     if "string" in value:
         return _string_like(src, node, str(value["string"]))
     raise EditError("unknown value kind")
@@ -255,11 +331,12 @@ def _string_like(src, node, s: str) -> str:
     if q not in ('"', "'", '"""', "'''"):
         q = '"'
     raw = "r" in prefix.lower()
-    if raw and (q in s or s.endswith("\\")):
+    if raw and (q[0] in s or s.endswith("\\") or (len(q) == 1 and ("\n" in s or "\r" in s))):
         prefix = prefix.replace("r", "").replace("R", "")
         raw = False
     body = s if raw else s.replace("\\", "\\\\")
     if not raw:
-        body = body.replace(q, "\\" + q) if len(q) == 1 else body
-        body = body.replace("\n", "\\n") if len(q) == 1 else body
+        body = body.replace(q[0], "\\" + q[0])  # inside triple quotes too
+        if len(q) == 1:
+            body = body.replace("\n", "\\n").replace("\r", "\\r")
     return f"{prefix}{q}{body}{q}"

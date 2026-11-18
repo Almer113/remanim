@@ -52,6 +52,7 @@ export interface Model {
   type: "model";
   file: string;
   rev: number;
+  session?: string;  // changes with every server run (frame URLs carry it)
   scenes: SceneModel[];
   fps: number;
   width: number;

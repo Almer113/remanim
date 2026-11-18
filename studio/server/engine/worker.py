@@ -73,19 +73,27 @@ class Worker:
         return {"scenes": self.engine.scenes(), "fps": self.engine.fps, "width": w, "height": h}
 
     def op_trace(self, msg):
+        if self.engine is None:
+            return {"error": {"message": "nothing is loaded in the engine", "code": "not_loaded"}}
         return self.engine.trace(msg["scene"])
 
     def op_activate(self, msg):
+        if self.engine is None:
+            return {"error": {"message": "nothing is loaded in the engine", "code": "not_loaded"}}
         self.engine.activate(msg["scene"], msg["duration"])
         return {}
 
     def op_status(self, msg):
+        import threading
         pool = self.engine.pools.get(msg["scene"]) if self.engine else None
-        return {"cursors": pool.parked() if pool else 0, "of": len(pool.spots) if pool else 0}
+        return {"cursors": pool.parked() if pool else 0, "of": len(pool.spots) if pool else 0,
+                "threads": threading.active_count()}
 
     def op_frame(self, msg):
+        if self.engine is None:
+            return {"error": {"message": "nothing is loaded in the engine", "code": "not_loaded"}}
         fps = self.engine.fps
-        t = msg["f"] / fps + 1e-4
+        t = max(0, int(msg["f"])) / fps + 1e-4  # a negative frame would never be reached
         c = self.engine.frame(msg["scene"], t, msg.get("ids", False))
         out = {"image": _encode(c.frame, msg.get("size", "full"), msg.get("fmt", "png"))}
         if c.idmap is not None:

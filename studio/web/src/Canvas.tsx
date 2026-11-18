@@ -16,6 +16,8 @@ interface Props {
  * from the ID map (one colour per selectable object, architecture.md §6). */
 export function Canvas({ url, idmapUrl, width, height, objects, selected, onSelect, stale }: Props) {
   const [shown, setShown] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [slow, setSlow] = useState(false);
   const [hover, setHover] = useState<Obj | null>(null);
   const ids = useRef<ImageData | null>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
@@ -24,10 +26,26 @@ export function Canvas({ url, idmapUrl, width, height, objects, selected, onSele
   // swap images only once the next one has loaded: no flashing while scrubbing
   useEffect(() => {
     let gone = false;
+    setFailed(null);
+    const slowTimer = window.setTimeout(() => { if (!gone) setSlow(true); }, 700);
     const img = new Image();
-    img.onload = () => { if (!gone) setShown(url); };
+    img.onload = () => {
+      if (gone) return;
+      clearTimeout(slowTimer);
+      setSlow(false);
+      setShown(url);
+    };
+    img.onerror = () => {
+      if (gone) return;
+      clearTimeout(slowTimer);
+      setSlow(false);
+      // 410 = an edit or reload made a new revision; the new frame follows
+      fetch(url).then((r) => r.status === 410 ? null : r.text().then((t) => t || `HTTP ${r.status}`))
+        .then((why) => { if (!gone && why) setFailed(why.slice(0, 160)); })
+        .catch(() => { if (!gone) setFailed("the studio server isn't answering"); });
+    };
     img.src = url;
-    return () => { gone = true; };
+    return () => { gone = true; clearTimeout(slowTimer); };
   }, [url]);
 
   useEffect(() => {
@@ -108,6 +126,8 @@ export function Canvas({ url, idmapUrl, width, height, objects, selected, onSele
       {shown && <img src={shown} alt="frame" draggable={false} />}
       <canvas ref={overlay} width={width} height={height} />
       {hover && <div className="hover-tag">{hover.name ?? hover.class}</div>}
+      {failed ? <div className="frame-msg">⚠ This frame didn't render: {failed}</div>
+        : slow ? <div className="frame-msg">Rendering this frame…</div> : null}
     </div>
   );
 }

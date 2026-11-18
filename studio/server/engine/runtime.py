@@ -56,6 +56,7 @@ def install() -> OriginTracker:
         raise EngineError(f"Manim {manim.__version__} is not supported; the studio is pinned to "
                           f"{SUPPORTED}x")
     os.chdir(ROOT)  # scene code and the voiceover cache use relative paths
+    _install_thread_rng()
 
     def dispatch(renderer, scene, *args, **kwargs):
         hook = getattr(renderer, "_studio_hook", None)
@@ -156,9 +157,76 @@ def _hex(c) -> str | None:
         return None
 
 
+# -- randomness ----------------------------------------------------------------
+# `random` and legacy `np.random` are process-wide, but cursors run construct()
+# on several threads at once: with shared generators an unseeded scene draws
+# different numbers in each cursor and objects jump between spots. Every
+# thread gets its own generators instead, seeded like a fresh `manim` run.
+_rng_local = threading.local()
+
+_PY_RANDOM = ["betavariate", "binomialvariate", "choice", "choices", "expovariate", "gammavariate",
+              "gauss", "getrandbits", "getstate", "lognormvariate", "normalvariate", "paretovariate",
+              "randbytes", "randint", "random", "randrange", "sample", "seed", "setstate", "shuffle",
+              "triangular", "uniform", "vonmisesvariate", "weibullvariate"]
+_NP_RANDOM = ["beta", "binomial", "bytes", "chisquare", "choice", "dirichlet", "exponential", "f",
+              "gamma", "geometric", "get_state", "gumbel", "hypergeometric", "laplace", "logistic",
+              "lognormal", "logseries", "multinomial", "multivariate_normal", "negative_binomial",
+              "noncentral_chisquare", "noncentral_f", "normal", "pareto", "permutation", "poisson",
+              "power", "rand", "randint", "randn", "random", "random_integers", "random_sample",
+              "ranf", "rayleigh", "sample", "seed", "set_state", "shuffle", "standard_cauchy",
+              "standard_exponential", "standard_gamma", "standard_normal", "standard_t",
+              "triangular", "uniform", "vonmises", "wald", "weibull", "zipf"]
+
+
+def _thread_rngs():
+    g = getattr(_rng_local, "g", None)
+    if g is None:
+        g = _rng_local.g = (random.Random(0), np.random.RandomState(0))
+    return g
+
+
+def _install_thread_rng():
+    if getattr(random, "_studio_thread_rng", False):
+        return
+
+    # Scene.__init__ calls random.seed(config.seed) and config.seed is None by
+    # default, which seeds from the OS: a plain `manim` render of an unseeded
+    # scene differs every run. The studio must show the same picture in every
+    # cursor and after every reload, so an unseeded seed() means seed 0.
+    def unseeded(a, k):
+        if (not a and k.get("seed", k.get("a")) is None) or (a and a[0] is None):
+            return (0,) + tuple(a[1:]), {}
+        return a, k
+
+    def py(name):
+        def f(*a, **k):
+            if name == "seed":
+                a, k = unseeded(a, k)
+            return getattr(_thread_rngs()[0], name)(*a, **k)
+        f.__name__ = name
+        return f
+
+    def npf(name):
+        def f(*a, **k):
+            if name == "seed":
+                a, k = unseeded(a, k)
+            return getattr(_thread_rngs()[1], name)(*a, **k)
+        f.__name__ = name
+        return f
+
+    for n in _PY_RANDOM:
+        if hasattr(random.Random, n):
+            setattr(random, n, py(n))
+    for n in _NP_RANDOM:
+        if hasattr(np.random.RandomState, n) and hasattr(np.random, n):
+            setattr(np.random, n, npf(n))
+    random._studio_thread_rng = True
+
+
 def _seed():
-    random.seed(0)
-    np.random.seed(0)
+    py, npr = _thread_rngs()
+    py.seed(0)
+    npr.seed(0)
 
 
 def _drawn_leaves(scene):
@@ -199,6 +267,10 @@ def capture(scene, want_ids: bool) -> Capture:
     return Capture(frame, idmap, objects)
 
 
+_STYLE_ATTRS = ("fill_opacity", "stroke_opacity", "fill_color", "stroke_color", "color",
+                "background_stroke_opacity", "background_stroke_color", "background_stroke_width")
+
+
 def _id_map(scene):
     """Repaint every drawn leaf in a flat colour per selectable object, draw,
     restore the colours exactly. Returns (index image HxW uint32, objects)."""
@@ -219,8 +291,11 @@ def _id_map(scene):
     saved = []
     for m in scene.get_mobject_family_members():
         if isinstance(m, VMobject):
+            # set_fill / set_stroke also overwrite these plain attributes, which the
+            # Inspector reads and later scene code may use: put them back too
+            attrs = {a: m.__dict__[a] for a in _STYLE_ATTRS if a in m.__dict__}
             saved.append((m, m.fill_rgbas.copy(), m.stroke_rgbas.copy(), m.background_stroke_rgbas.copy(),
-                          m.stroke_width, m.background_stroke_width, getattr(m, "sheen_factor", 0.0)))
+                          m.stroke_width, m.background_stroke_width, getattr(m, "sheen_factor", 0.0), attrs))
         elif isinstance(m, ImageMobject):
             saved.append((m, m.pixel_array.copy()))
     cam = scene.renderer.camera
@@ -270,7 +345,8 @@ def _id_map(scene):
                 m.stroke_width, m.background_stroke_width = s[4], s[5]
                 if hasattr(m, "sheen_factor"):
                     m.sheen_factor = s[6]
-    code = (raw[:, :, 0] << 16) | (raw[:, :, 1] << 8) | raw[:, :, 2]
+                m.__dict__.update(s[7])
+    code =(raw[:, :, 0] << 16) | (raw[:, :, 1] << 8) | raw[:, :, 2]
     lookup = {(c[0] << 16) | (c[1] << 8) | c[2]: i
               for i, c in ((i, _id_color(i)) for i in range(1, len(objects) + 1))}
     # keep pixels of an exact ID colour with >= 2 same-coloured neighbours:
@@ -352,6 +428,7 @@ class Engine:
         mod = type(sys)(name)
         mod.__file__ = str(self.path)
         sys.modules[name] = mod
+        self.module_name = name
         code = compile(data, str(self.path), "exec")
         try:
             with tempconfig(self.config):
@@ -521,6 +598,8 @@ class Engine:
         for p in self.pools.values():
             p.close()
         self.pools.clear()
+        # every load and verify makes a new module; don't keep old revisions alive
+        sys.modules.pop(getattr(self, "module_name", ""), None)
 
 
 # -- live cursors (S1) --------------------------------------------------------
@@ -533,6 +612,9 @@ class Cursor:
         self.park = park
         self.parked = threading.Event()
         self.dead = False
+        # set once the cursor is unwinding: a user `finally:` that calls
+        # wait() (manim-voiceover does) must not block on the request queue
+        self.stopping = False
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._main, daemon=True)
         self.started = False
@@ -540,10 +622,13 @@ class Cursor:
         if start:
             self.start()
 
+    _state = threading.Lock()  # start() and close() race between the warm thread and the pool
+
     def start(self):
-        if not self.started:
-            self.started = True
-            self.thread.start()
+        with self._state:
+            if not self.started and not self.dead:
+                self.started = True
+                self.thread.start()
 
     def frame_at(self, t: float, want_ids: bool):
         with self.lock:
@@ -553,6 +638,11 @@ class Cursor:
             return self.replies.get()
 
     def close(self):
+        with self._state:
+            if not self.started:  # never ran: nothing to unwind, no thread to start
+                self.dead = self.stopping = True
+                self.parked.set()
+                return
         self.requests.put(("stop", 0.0, False))
 
     def _main(self):
@@ -564,7 +654,13 @@ class Cursor:
         def next_request():
             return pending.pop() if pending else self.requests.get()
 
+        def stop():
+            self.stopping = True
+            raise SystemExit
+
         def hook(renderer, scene, *args, **kwargs):
+            if self.stopping:
+                raise SystemExit
             renderer.skip_animations = True
             start = renderer.time
             self.position = start
@@ -580,14 +676,14 @@ class Cursor:
             while True:
                 kind, t, ids = next_request()
                 if kind == "stop":
-                    raise SystemExit
+                    stop()
                 if t >= end:
                     pending.append((kind, t, ids))
                     break
                 if t < start:
-                    self._reply(kind, None)
                     self.dead = True
-                    raise SystemExit
+                    self._reply(kind, None)
+                    stop()
                 if kind == "park":
                     self.parked.set()
                     continue
@@ -599,9 +695,9 @@ class Cursor:
                     done = k
                 else:
                     if k < done:
-                        self._reply(kind, None)
                         self.dead = True
-                        raise SystemExit
+                        self._reply(kind, None)
+                        stop()
                     for i in range(done + 1, k + 1):
                         renderer.time = start + i * step
                         scene.update_to_time(times[i])
@@ -639,6 +735,8 @@ class Cursor:
             try:
                 scene.render()
             except SystemExit:
+                self.dead = True
+                self.parked.set()
                 return
             self.position = scene.renderer.time
             while True:
@@ -656,7 +754,8 @@ class Cursor:
         except BaseException as e:  # report instead of hanging the caller
             self.dead = True
             self.parked.set()
-            self._reply("frame", e)
+            if not self.stopping:
+                self._reply("frame", e)
 
     def _reply(self, kind, value):
         if kind == "frame":
@@ -677,6 +776,7 @@ class CursorPool:
         self.cursors: list[Cursor] = [Cursor(engine, scene_name, p, start=(i == 0))
                                       for i, p in enumerate(self.spots)]
         self.closed = False
+        self.error: tuple[float, EngineError] | None = None
         threading.Thread(target=self._warm, args=(list(self.cursors), warm_together), daemon=True).start()
 
     def _warm(self, cursors: list, together: int):
@@ -694,9 +794,15 @@ class CursorPool:
         return sum(1 for spot in self.spots
                    if any(c.park == spot and c.parked.is_set() and not c.dead for c in self.cursors))
 
+    MAX_CURSORS = 24  # each holds a whole scene in memory
+
     def frame_at(self, t: float, want_ids: bool) -> Capture:
-        while True:
-            live = [c for c in self.cursors if c.started and not c.dead and c.position <= t + 1e-9]
+        if self.error is not None and t >= self.error[0]:
+            raise self.error[1]  # the scene stops here; don't burn another cursor on it
+        for _ in range(4):
+            # a cursor still warming toward a later spot would run past t
+            live = [c for c in self.cursors if c.started and not c.dead and c.position <= t + 1e-9
+                    and (c.parked.is_set() or c.park <= t + 1e-9)]
             if live:
                 cur = max(live, key=lambda c: c.position)
             else:
@@ -705,28 +811,42 @@ class CursorPool:
             spot = cur.park
             got = cur.frame_at(t, want_ids)
             if isinstance(got, BaseException):
-                if isinstance(got, EngineError):
-                    raise got
-                raise self.engine._error(got)
-            if got is None:
-                self.cursors.remove(cur)
+                err = got if isinstance(got, EngineError) else self.engine._error(got)
+                if cur.dead:  # the scene itself failed at this time
+                    self._drop(cur, spot)
+                    self.error = (t, err)
+                raise err
+            if got is None:  # it had already moved past t
+                self._drop(cur, spot)
                 continue
             if spot < cur.position - 1e-9 and spot in self.spots:
                 cur.park = cur.position
                 self._refill(spot)
             return got
+        # cursors keep missing (should not happen): answer from a plain replay
+        c, _, _ = self.engine.run(self.scene_name, t, want_ids)
+        return c
+
+    def _drop(self, cur: "Cursor", spot: float):
+        if cur in self.cursors:
+            self.cursors.remove(cur)
+        cur.close()
+        if spot in self.spots:
+            self._refill(spot)
 
     def _refill(self, spot: float):
-        if any(c.park == spot and not c.dead and c.position <= spot for c in self.cursors):
+        if self.closed or any(c.park == spot and not c.dead and c.position <= spot for c in self.cursors):
             return
         self.cursors.append(Cursor(self.engine, self.scene_name, spot))
-        if len(self.cursors) > 40:
-            for c in self.cursors[:-40]:
+        if len(self.cursors) > self.MAX_CURSORS:
+            # let go of cursors that moved on from their spot first; parked ones are the pool
+            extra = len(self.cursors) - self.MAX_CURSORS
+            moved = [c for c in self.cursors if c.park not in self.spots or c.dead]
+            for c in moved[:extra]:
                 c.close()
-            self.cursors = self.cursors[-40:]
+                self.cursors.remove(c)
 
     def close(self):
         self.closed = True
         for c in self.cursors:
             c.close()
-            c.start()  # an unstarted cursor must still read its stop

@@ -99,3 +99,9 @@ button.pri { background: var(--sel); border-color: var(--sel); color: #fff; }
   .layers, .inspector, .stage, .timeline-wrap, .code-wrap { grid-column: 1; grid-row: auto; }
   .code-wrap { height: 200px; }
 }
+input.bad { border-color: #e0614f; background: #2a1715; }
+input.dirty { border-color: #c9a23a; }
+
+.field-err { color: #f08a7a; font-size: 11px; grid-column: 1 / -1; }
+.field-hint { color: #9aa0a8; font-size: 11px; grid-column: 1 / -1; text-align: right; }
+.canvas .frame-msg { position: absolute; left: 8px; bottom: 8px; background: rgba(20, 22, 28, .85); color: #f0c674; font-size: 12px; padding: 3px 8px; border-radius: 4px; pointer-events: none; }

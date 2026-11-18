@@ -129,6 +129,10 @@ def set_keyword(src: Source, call: ast.Call, name: str, value: str | None) -> Ed
         has_comma = trailing.lstrip().startswith(b",")
         line_end = src.line_end(last.end_lineno)
         nl = src.newline
+        if has_comma and call.end_lineno == last.end_lineno:
+            # `    b,)`: the closing paren shares the line; add after the comma
+            comma = at + trailing.index(b",") + 1
+            return Edit(comma, comma, f" {name}={value},")
         if has_comma:
             return Edit(line_end, line_end, f"{indent}{name}={value},{nl}")
         return Edit(at, at, f",{nl}{indent}{name}={value}")

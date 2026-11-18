@@ -13,37 +13,55 @@ interface Props {
   model: Model | null;
   busy: boolean;
   f: number;
+  onScreen: boolean;
   sendEdit: (msg: object) => void;
 }
+
+const BAD_VALUE = "Type a number (2, -0.5, 1e-3), a name (ACCENT, BLUE) or a \"string\"";
 
 /** A value typed by the user: number, name (ACCENT, smooth) or "string". */
 function parseValue(text: string): object | null {
   const t = text.trim();
-  if (/^[-+]?(\d+\.?\d*|\.\d+)$/.test(t)) return { number: Number(t) };
-  if (/^[A-Za-z_][\w.]*$/.test(t)) return { name: t };
+  if (/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(t)) {
+    const n = Number(t);
+    return Number.isFinite(n) ? { number: n } : null;
+  }
+  if (/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test(t)) return { name: t };
   const m = t.match(/^[rR]?(["'])(.*)\1$/s);
   if (m) return { string: m[2] };
   return null;
 }
 
+/** An input that commits on Enter. Leaving it undoes the change (an edit
+ * replays the scene, so it never fires by accident); a wrong value stays
+ * in the box, marked, with the reason. */
 function Field({ label, value, onCommit, disabled, title }: {
-  label: string; value: string; onCommit: (v: string) => void; disabled?: boolean; title?: string;
+  label: string; value: string; onCommit: (v: string) => string | null; disabled?: boolean; title?: string;
 }) {
   const [v, setV] = useState(value);
-  useEffect(() => setV(value), [value]);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { setV(value); setErr(null); }, [value]);
+  const dirty = v !== value;
   return (
-    <div className="row" title={title}>
+    <div className="row" title={err ?? title}>
       <label>{label}</label>
-      <input value={v} disabled={disabled} onChange={(e) => setV(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && v !== value) onCommit(v); if (e.key === "Escape") setV(value); }}
-        onBlur={() => { if (v !== value) setV(value); }} />
+      <input value={v} disabled={disabled} className={err ? "bad" : dirty ? "dirty" : ""}
+        onChange={(e) => { setV(e.target.value); setErr(null); }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && dirty) setErr(onCommit(v));
+          if (e.key === "Escape") { setV(value); setErr(null); }
+        }}
+        onBlur={() => { if (dirty && !err) setV(value); }} />
+      {err && <span className="field-err">{err}</span>}
+      {dirty && !err && <span className="field-hint">↵ to apply</span>}
     </div>
   );
 }
 
-export function Inspector({ sel, scene, model, busy, f, sendEdit }: Props) {
+export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit }: Props) {
   const [newProp, setNewProp] = useState("");
   const [newVal, setNewVal] = useState("");
+  const [newErr, setNewErr] = useState<string | null>(null);
   if (!sel || !scene || !model) {
     return (
       <div>
@@ -72,12 +90,19 @@ export function Inspector({ sel, scene, model, busy, f, sendEdit }: Props) {
         <Field label={c.kind === "wait" ? (c.call_name === "at" ? "Pause" : "wait") : "run_time"}
           value={dur.toFixed(3).replace(/\.?0+$/, "")} disabled={!!locked || busy}
           title={c.call_name === "at" ? "changes the at() time that ends this pause" : "Enter to apply"}
-          onCommit={(v) => { const n = Number(v); if (n > 0) edit("duration", n); }} />
+          onCommit={(v) => {
+            const n = Number(v.trim());
+            if (!v.trim() || !Number.isFinite(n) || n <= 0) return "A length in seconds, more than 0";
+            edit("duration", n);
+            return null;
+          }} />
         {c.kind === "play" && (
           <div className="row">
             <label>Easing</label>
-            <select value={rate ?? ""} disabled={!!locked || busy} onChange={(e) => edit("rate_func", e.target.value)}>
-              {[...new Set([rate ?? "smooth", ...RATE_FUNCS])].map((r) => <option key={r} value={r}>{r}</option>)}
+            <select value={rate ?? ""} disabled={!!locked || busy}
+              onChange={(e) => edit("rate_func", e.target.value || (a ? a.default_rate_func : c.anims[0]?.default_rate_func) || "smooth")}>
+              {!rate && <option value="">(default)</option>}
+              {[...new Set([...(rate ? [rate] : []), ...RATE_FUNCS])].map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </div>
         )}
@@ -94,10 +119,13 @@ export function Inspector({ sel, scene, model, busy, f, sendEdit }: Props) {
   const params = o.params ?? [];
   const positional = (o.args ?? []).map((v, i) => [params[i] ?? `arg ${i}`, v] as const)
     .filter(([p]) => !p.startsWith("arg ") && !p.startsWith("*"));
-  const send = (prop: string, value: object | null) => {
-    if (!value) return;
+  const send = (prop: string, value: object | null): string | null => {
+    if (!value) return BAD_VALUE;
+    if (!/^[A-Za-z_]\w*$/.test(prop)) return "A property is a keyword name, like fill_opacity";
     sendEdit({ type: "edit.prop", object: o, prop, value, f });
+    return null;
   };
+  const off = !onScreen;
   return (
     <div>
       <h3>{o.name ?? o.class} <small>{o.class}</small></h3>
@@ -106,33 +134,40 @@ export function Inspector({ sel, scene, model, busy, f, sendEdit }: Props) {
       {o.center && <div className="row"><label>Position</label><span className="mono">x {o.center[0].toFixed(2)} · y {o.center[1].toFixed(2)}</span></div>}
       {o.color && <div className="row"><label>Colour now</label><span><span className="swatch" style={{ background: o.color }} /> {o.color}</span></div>}
       {locked && <div className="note">🔒 {locked}</div>}
+      {!locked && off && <div className="note">Not on screen at this frame: move the playhead to where it shows to edit it.</div>}
       {o.in_helper && !locked && <div className="note">Made inside {o.func}(): edits here change every object that helper makes (you'll be asked first).</div>}
       {o.call_text && <div className="code tiny">{o.call_text}</div>}
       {!locked && (
         <>
           <h4>Arguments</h4>
           {positional.map(([p, v]) => (
-            <Field key={p} label={p} value={v} disabled={busy} onCommit={(nv) => send(p, parseValue(nv))} />
+            <Field key={p} label={p} value={v} disabled={busy || off} onCommit={(nv) => send(p, parseValue(nv))} />
           ))}
           {Object.entries(kwargs).map(([k, v]) => (
             <div key={k} className="kwrow">
-              <Field label={k} value={v} disabled={busy} onCommit={(nv) => send(k, parseValue(nv))} />
+              <Field label={k} value={v} disabled={busy || off} onCommit={(nv) => send(k, parseValue(nv))} />
               {k.includes("color") && (
-                <select value="" disabled={busy} onChange={(e) => send(k, { name: e.target.value })} title="Palette">
+                <select value="" disabled={busy || off} onChange={(e) => send(k, { name: e.target.value })} title="Palette">
                   <option value="">palette…</option>
                   {COLORS.map((c) => <option key={c}>{c}</option>)}
                 </select>
               )}
-              <button className="x" disabled={busy} title="Remove: back to the default" onClick={() => send(k, { default: true })}>×</button>
+              <button className="x" disabled={busy || off} title="Remove: back to the default" onClick={() => send(k, { default: true })}>×</button>
             </div>
           ))}
           <div className="row add">
-            <input placeholder="property" value={newProp} onChange={(e) => setNewProp(e.target.value)} list="params" />
+            <input placeholder="property" value={newProp} disabled={off} onChange={(e) => { setNewProp(e.target.value); setNewErr(null); }} list="params" />
             <datalist id="params">{["color", "fill_opacity", "stroke_width", "font_size", ...params].map((p) => <option key={p} value={p} />)}</datalist>
-            <input placeholder="value" value={newVal} onChange={(e) => setNewVal(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && newProp) { send(newProp, parseValue(newVal)); setNewProp(""); setNewVal(""); } }} />
+            <input placeholder="value" value={newVal} disabled={off} className={newErr ? "bad" : ""}
+              onChange={(e) => { setNewVal(e.target.value); setNewErr(null); }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || !newProp.trim()) return;
+                const why = send(newProp.trim(), parseValue(newVal));
+                setNewErr(why);
+                if (!why) { setNewProp(""); setNewVal(""); }
+              }} />
           </div>
-          <div className="muted small-gap">Type a number, a name (ACCENT, BLUE) or a "string", then Enter.</div>
+          <div className={newErr ? "field-err small-gap" : "muted small-gap"}>{newErr ?? "Type a number, a name (ACCENT, BLUE) or a \"string\", then Enter."}</div>
         </>
       )}
     </div>

@@ -34,27 +34,44 @@ export function Timeline({ scene, f, fps, nFrames, sel, selectedObjectId, onSeek
     return () => ro.disconnect();
   }, []);
 
-  const pps = ((width - LABEL - 12) / dur) * zoom; // pixels per second
+  const pps = Math.max(1e-3, ((width - LABEL - 12) / dur) * zoom); // pixels per second
   const x = (t: number) => LABEL + t * pps;
   const snap = (t: number) => Math.max(0.05, Math.round(t * 20) / 20); // clean numbers in the code
 
-  // trimming and scrubbing with the mouse
+  // trimming with the mouse. The latest trim, pps and onTrim live in refs,
+  // so a model update mid-drag never sends an edit against an old state.
+  const trimRef = useRef(trim);
+  trimRef.current = trim;
+  const live = useRef({ pps, onTrim });
+  live.current = { pps, onTrim };
+  const dragging = !!trim;
   useEffect(() => {
-    if (!trim) return;
-    const move = (e: MouseEvent) => setTrim((tr) => tr && { ...tr, d: snap(tr.base + (e.clientX - tr.start) / pps) });
-    const up = () => {
-      setTrim((tr) => {
-        if (tr && Math.abs(tr.d - tr.base) > 1e-6) onTrim(tr.clip, tr.anim, Number(tr.d.toFixed(4)));
-        return null;
-      });
+    if (!dragging) return;
+    const move = (e: MouseEvent) => {
+      const tr = trimRef.current;
+      if (tr) setTrim({ ...tr, d: snap(tr.base + (e.clientX - tr.start) / live.current.pps) });
     };
+    const up = () => {
+      const tr = trimRef.current;
+      setTrim(null);
+      if (tr && Math.abs(tr.d - tr.base) > 1e-6) live.current.onTrim(tr.clip, tr.anim, Number(tr.d.toFixed(4)));
+    };
+    const cancel = () => setTrim(null);  // left the window mid-drag: don't commit later by surprise
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") cancel(); };
     window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up, { once: true });
+    window.addEventListener("mouseup", up);
+    window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", key);
     return () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
+      window.removeEventListener("blur", cancel);
+      window.removeEventListener("keydown", key);
     };
-  }, [trim?.clip, trim?.anim]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dragging]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // a new model (edit, reload) ends any drag that was based on the old one
+  useEffect(() => { setTrim(null); }, [scene]);
 
   const scrubFrom = (e: React.MouseEvent) => {
     const el = lane.current!;
@@ -62,12 +79,18 @@ export function Timeline({ scene, f, fps, nFrames, sel, selectedObjectId, onSeek
     const at = (cx: number) => ((cx - r.left + el.scrollLeft - LABEL) / pps) * fps;
     onSeek(at(e.clientX), false);
     const move = (ev: MouseEvent) => onSeek(at(ev.clientX), false);
+    const stop = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      window.removeEventListener("blur", stop);
+    };
     const up = (ev: MouseEvent) => {
       onSeek(at(ev.clientX), true);
-      window.removeEventListener("mousemove", move);
+      stop();
     };
     window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up, { once: true });
+    window.addEventListener("mouseup", up);
+    window.addEventListener("blur", stop);
   };
 
   const ticks: number[] = [];

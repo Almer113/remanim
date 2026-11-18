@@ -94,7 +94,15 @@ async def round_trip(doc: Document, orig: bytes, msg: dict) -> dict:
     u = await doc.undo_redo("undo")
     res["undo"] = u.get("type")
     res["bytes_ok"] = doc.path.read_bytes() == orig
+    await settled(doc)
     return res
+
+
+async def settled(doc: Document):
+    """Edits reply once the active scene is traced; wait for the rest too."""
+    t = getattr(doc, "_load_task", None)
+    if t is not None:
+        await t
 
 
 def pick_number(objs: list) -> tuple[dict, str, float] | None:
@@ -174,7 +182,9 @@ async def run_file(rel: str, api: list[str]) -> dict:
                             break
                 if not prop_done and (p := pick_number(objs)):
                     o, k, num = p
-                    if float(num).is_integer() and "." not in o["kwargs"][k]:
+                    if "opacity" in k:
+                        v = round(max(0.1, min(1.0, num)) * 0.8, 3)  # opacities stay in (0, 1]
+                    elif float(num).is_integer() and "." not in o["kwargs"][k]:
                         v = int(num) + 1  # counts stay whole
                     elif 0 < num <= 1:
                         v = round(num * 0.8, 3)  # opacities stay in range

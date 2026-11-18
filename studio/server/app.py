@@ -16,6 +16,48 @@ from .project import ROOT, Document, rel
 WEB = ROOT / "studio" / "web" / "dist"
 SKIP_DIRS = {".venv", "media", "node_modules", ".git", "studio/server", "studio/spikes", "studio/web",
              "__pycache__", ".claude"}
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+DEV_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}  # `npm run dev` (vite proxy)
+
+
+def _host_name(host: str) -> str:
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host[: host.find("]") + 1]
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def _same_server(origin: str, host: str) -> bool:
+    """http://localhost:8770 and http://127.0.0.1:8770 are both this server."""
+    scheme, _, rest = origin.partition("://")
+    port = lambda h: h.rsplit(":", 1)[1] if ":" in h and not h.endswith("]") else ""  # noqa: E731
+    return scheme in ("http", "https") and _host_name(rest) in LOCAL_HOSTS and port(rest) == port(host)
+
+
+@web.middleware
+async def local_only(req: web.Request, handler):
+    """Opening a file runs it and edits write code, so only this machine's
+    own pages may talk to the server: the Host must be local (no DNS
+    rebinding) and a browser's Origin must be this server."""
+    if _host_name(req.host or "") not in LOCAL_HOSTS:
+        raise web.HTTPForbidden(text="the studio only answers on localhost")
+    origin = req.headers.get("Origin")
+    if origin is not None and origin not in DEV_ORIGINS and not _same_server(origin, req.host):
+        raise web.HTTPForbidden(text="cross-origin requests are not allowed")
+    return await handler(req)
+
+
+def normalise(name: str) -> str:
+    """The project-relative name of a scene file the studio may open."""
+    path = (ROOT / str(name)).resolve()
+    if ROOT not in path.parents or path.suffix != ".py" or not path.is_file():
+        raise web.HTTPBadRequest(text="not a scene file in this project")
+    r = rel(path)
+    parts = r.split("/")[:-1]
+    if any(p in SKIP_DIRS or p.startswith(".") or "/".join(parts[: i + 1]) in SKIP_DIRS
+           for i, p in enumerate(parts)):
+        raise web.HTTPBadRequest(text="that folder holds tools, not scenes")
+    return r
 
 
 def scene_files() -> list[dict]:
@@ -65,14 +107,12 @@ class Hub:
                 self.clients.discard(ws)
 
     async def open(self, name: str) -> Document:
+        name = normalise(name)
         doc = self.docs.get(name)
         if doc is not None:
             await doc.send_model()
             return doc
-        path = (ROOT / name).resolve()
-        if ROOT not in path.parents or path.suffix != ".py" or not path.exists():
-            raise web.HTTPBadRequest(text="not a scene file in this project")
-        doc = Document(path, [], self.notify)
+        doc = Document(ROOT / name, [], self.notify)
         self.docs[doc.name] = doc
         if self.api is None:
             r = await doc.worker.request({"op": "hello"})
@@ -239,7 +279,7 @@ async def on_cleanup(app):
 
 
 def make_app() -> web.Application:
-    app = web.Application(client_max_size=64 * 1024 * 1024)
+    app = web.Application(client_max_size=64 * 1024 * 1024, middlewares=[local_only])
     app.router.add_get("/", index)
     app.router.add_get("/api/files", files)
     app.router.add_get("/api/status", status)

@@ -153,11 +153,20 @@ class OriginTracker:
             f = f.f_back
         chain.reverse()
         user_site = chain[-1] if chain else None
-        occ = 0
+        # occurrence: how many objects this call made before; objects made in
+        # library code are counted per class and calling line, so copies made
+        # by the same user call don't share an id
         if site is not None:
+            key = site.key()
+        elif user_site is not None:
+            key = ("~", type(mob).__name__, user_site.key())
+        else:
+            key = None
+        occ = 0
+        if key is not None:
             counts = self.counts
-            occ = counts[site.key()]
-            counts[site.key()] += 1
+            occ = counts[key]
+            counts[key] += 1
         return Origin(site, user_site, chain, occ, regenerated=regenerated)
 
 

@@ -32,7 +32,8 @@ class Span:
 class Source:
     def __init__(self, data: bytes):
         self.data = data
-        self.line_starts = [0]
+        # ast columns on line 1 are counted after a UTF-8 BOM; offsets are not
+        self.line_starts = [3 if data.startswith(b"\xef\xbb\xbf") else 0]
         for i, b in enumerate(data):
             if b == 0x0A:
                 self.line_starts.append(i + 1)
@@ -113,7 +114,7 @@ class Source:
                 return node
             f = node.func
             if isinstance(f, ast.Attribute) and f.end_lineno == span.line and \
-                    f.end_col_offset - len(f.attr) == span.col:
+                    f.end_col_offset - len(f.attr.encode("utf-8")) == span.col:
                 return node
         return None
 
