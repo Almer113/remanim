@@ -3,9 +3,11 @@ any frame (with an ID map for picking). Ported from the Phase 0 spikes
 (frame_engine.py, cursor_engine.py, s3_bench.py); the reasoning behind the
 clock code is in docs/phase0/S1_frame_at_time.md and S4_timing.md.
 
-This module and identity.py are the only places that touch Manim internals
-(architecture.md §3): CairoRenderer.play, Mobject.__init__/copy, Text's SVG
-cache flag, the __init__ of file-backed mobjects, and an audio-length memo.
+This module, identity.py and moves.py are the only places that touch Manim
+internals (architecture.md §3): CairoRenderer.play, Mobject.__init__/copy,
+Text's SVG cache flag, the __init__ of file-backed mobjects, an audio-length
+memo (here and in identity.py), and the Mobject move/scale/rotate methods,
+Mobject.add and Transform.begin (moves.py, recording only).
 """
 
 from __future__ import annotations
@@ -650,6 +652,12 @@ class Engine:
         self.pools.clear()
         # every load and verify makes a new module; don't keep old revisions alive
         sys.modules.pop(getattr(self, "module_name", ""), None)
+        # caches keyed by class or code object would pin the old module through a
+        # class the scene file defines; they refill cheaply
+        _default_rate.cache_clear()
+        class_params.cache_clear()
+        from . import identity
+        identity._POSITIONS.clear()
 
 
 # -- live cursors (S1) --------------------------------------------------------

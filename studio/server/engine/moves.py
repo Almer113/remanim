@@ -33,6 +33,10 @@ SCALE = ("scale", "scale_to_fit_width", "scale_to_fit_height", "stretch_to_fit_w
          "stretch_to_fit_height", "set_width", "set_height")
 ROTATE = ("rotate", "flip")
 LAYOUT = ("arrange", "arrange_in_grid")
+# the Animation methods that run while a play() moves things
+ANIM_STEPS = frozenset({"interpolate", "interpolate_mobject", "interpolate_submobject", "begin", "finish",
+                        "clean_up_from_scene", "update_mobjects"})
+MORPHS_KEPT = 4
 KEEP = 8  # records kept per mobject and group of methods
 
 _clock = itertools.count()
@@ -138,8 +142,18 @@ class MoveRecorder:
         chain, kind, owner = [], "static", mob
         tracker = self.tracker
         from .identity import site_of
+        from manim import Animation
+        from manim.animation.transform import _MethodAnimation
         while f is not None:
             co = f.f_code
+            if co.co_name in ANIM_STEPS:
+                slf = f.f_locals.get("self")
+                if isinstance(slf, _MethodAnimation) and co.co_name == "finish":
+                    # finish() applies the `.animate` methods again on the real object;
+                    # the `animate` record made when the builder ran names the code
+                    return
+                if kind == "static" and isinstance(slf, Animation):
+                    kind = "animation"  # moved by a running animation (MoveAlongPath, a custom one, ...)
             if tracker.is_user(f):
                 chain.append(site_of(f))
             elif co.co_name == "update_target" and co.co_filename.endswith("mobject.py"):
@@ -152,10 +166,6 @@ class MoveRecorder:
                     owner, kind = b.mobject, "animate"
             elif co.co_name == "update" and co.co_filename.endswith("mobject.py"):
                 kind = "updater"
-            elif kind == "static" and co.co_name in ("interpolate", "interpolate_mobject", "begin",
-                                                      "finish", "clean_up_from_scene") \
-                    and "animation" in co.co_filename.replace("\\", "/"):
-                kind = "animation"  # moved by a running animation (MoveAlongPath, ...)
             f = f.f_back
         if not chain:
             return
@@ -164,14 +174,6 @@ class MoveRecorder:
         if "about_edge" in kwargs or "about_point" in kwargs:
             args["about"] = True
         mv = Move(next(_clock), name, chain[-1], kind, chain, args=args)
-        if kind == "animation":
-            # _MethodAnimation.finish() applies `.animate` methods again on the
-            # real object: the `animate` record made at build time is the one
-            # that names the code
-            prev = moves_of(owner, group_of(name))
-            if prev and prev[-1].kind == "animate" and prev[-1].site.line == mv.site.line \
-                    and prev[-1].site.file == mv.site.file:
-                return
         _push(owner, mv)
         if name in LAYOUT and kind == "static":
             # everything inside was placed by this layout call
@@ -194,8 +196,15 @@ class MoveRecorder:
                 lst = anim.mobject.__dict__.get("_studio_morphs")
                 if lst is None:
                     lst = anim.mobject.__dict__["_studio_morphs"] = Fresh()
-                if target not in lst:
-                    lst.append(target)
+                # one per place in the code, the latest few: `Transform(counter,
+                # MathTex(str(i)))` in a loop makes one target per pass
+                key = o.site.key()
+                for old in [t for t in lst if t is target or getattr(t, "_studio_origin", None) is not None
+                            and t._studio_origin.site is not None and t._studio_origin.site.key() == key]:
+                    lst.remove(old)
+                lst.append(target)
+                while len(lst) > MORPHS_KEPT:
+                    del lst[0]
             return orig(anim)
         Transform.begin = begin
 

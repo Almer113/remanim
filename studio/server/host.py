@@ -8,7 +8,8 @@ import time
 
 from .engine.worker import main as worker_main
 
-DEADLINES = {"hello": 60, "load": 120, "trace": 180, "frame": 60, "activate": 30,
+# hello: the first `import manim` on a cold disk can take a minute or more
+DEADLINES = {"hello": 180, "load": 120, "trace": 180, "frame": 60, "activate": 30,
              "status": 10, "verify": 240}
 
 

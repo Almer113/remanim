@@ -32,6 +32,7 @@ type Drag = {
   ghost: HTMLCanvasElement | null;  // the object's own pixels, cut out with the ID map
   hole: HTMLCanvasElement | null;   // a dark mask over where it was
   gx: number | null; gy: number | null;  // guide lines hit (scene units)
+  url: string;          // the frame the drag started on: a gesture on another frame is void
 };
 
 const HANDLE = 5;     // half-size of a scale handle, canvas px
@@ -100,9 +101,10 @@ export function Canvas(p: Props) {
     return () => { gone = true; };
   }, [idmapUrl]);
 
-  useEffect(() => { setHeld(null); }, [shown, objects]);
-  // a refused edit leaves the frame as it was: drop the ghost once the reply is in
-  useEffect(() => { if (editable) setHeld(null); }, [editable]);
+  // the ghost of the last gesture stays until the edited frame is on screen;
+  // a refused edit leaves the frame as it was, so the ghost goes with the reply
+  useEffect(() => { setHeld(null); }, [shown]);
+  useEffect(() => { if (editable) setHeld((h) => (h && h.url === url ? null : h)); }, [editable, url]);
 
   // -- coordinates ----------------------------------------------------------------
   const toCanvas = (e: { clientX: number; clientY: number }): [number, number] => {
@@ -159,7 +161,8 @@ export function Canvas(p: Props) {
 
   const pickAt = (x: number, y: number): Obj | null => {
     const d = ids.current;
-    if (!d) return null;
+    // the ID map belongs to `url`; while an older image is still shown, clicks resolve to nothing
+    if (!d || shown !== url) return null;
     const px0 = Math.floor((x / width) * d.width);
     const py0 = Math.floor((y / height) * d.height);
     // exact pixel first, then the nearest object within 4 px (thin lines)
@@ -185,8 +188,11 @@ export function Canvas(p: Props) {
     if (!sel?.box || !editable) return null;
     const [x0, y0, x1, y1] = sel.box;
     const tol = HANDLE + 2 * screenScale();
+    // a small object (a Dot) is mostly corners: a press on its own pixels moves it
+    const small = x1 - x0 < 4 * tol || y1 - y0 < 4 * tol;
+    const onIt = small && x >= x0 && x <= x1 && y >= y0 && y <= y1;
     for (const [hx, hy] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) {
-      if (Math.abs(x - hx) <= tol && Math.abs(y - hy) <= tol) return "scale";
+      if (!onIt && Math.abs(x - hx) <= tol && Math.abs(y - hy) <= tol) return "scale";
     }
     if (Math.hypot(x - (x0 + x1) / 2, y - (y0 - ROT_GAP * screenScale())) <= tol + 2) return "rotate";
     return null;
@@ -373,37 +379,51 @@ export function Canvas(p: Props) {
     if (h && sel) {
       e.preventDefault();
       setDrag({ obj: sel, picked: sel, kind: h, x0: x, y0: y, x, y, started: false, shift: e.shiftKey,
-        alt: e.altKey, ghost: null, hole: null, gx: null, gy: null });
+        alt: e.altKey, ghost: null, hole: null, gx: null, gy: null, url });
       return;
     }
-    const o = pickAt(x, y);
+    let o = pickAt(x, y);
+    // inside the selection's box, a press drags the selection (a hollow Square
+    // has no pixels inside it), unless another object is under the pointer
+    const inSel = !!(sel?.box && editable && x >= sel.box[0] && x <= sel.box[2] && y >= sel.box[1] && y <= sel.box[3]);
+    if (inSel && (!o || o === sel || members(sel!).includes(objects.indexOf(o)))) o = o ?? sel;
     // dragging an object inside the selected group moves the group
-    const target = o && sel && sel.virtual && members(sel).includes(objects.indexOf(o)) ? sel : o;
+    const target = o && sel && (o === sel || sel.virtual && members(sel).includes(objects.indexOf(o))) ? sel : o;
     if (o) e.preventDefault();
     setDrag({ obj: target as Obj, picked: o, kind: "move", x0: x, y0: y, x, y, started: false, shift: e.shiftKey,
-      alt: e.altKey, ghost: null, hole: null, gx: null, gy: null });
+      alt: e.altKey, ghost: null, hole: null, gx: null, gy: null, url });
   };
 
   useEffect(() => {
     if (!drag) return;
+    const cancel = () => setDrag(null);   // nothing is sent
     const move = (e: MouseEvent) => {
+      // the button came up outside the window (Alt-Tab): the drag is over
+      if ((e.buttons & 1) === 0) { cancel(); return; }
       const [x, y] = toCanvas(e);
-      setDrag((d) => {
-        if (!d) return d;
+      const d = drag;
+      if (!d.started) {
         const far = Math.hypot(x - d.x0, y - d.y0) > 3 * screenScale();
-        if (!d.started && (!far || !d.obj || !editable)) return d;
-        if (!d.started) {
-          const [ghost, hole] = cutOut(d.obj);
-          if (d.obj.id !== selected) p.onSelect(d.obj, "set");
-          return { ...d, x, y, started: true, ghost, hole, shift: e.shiftKey, alt: e.altKey };
-        }
-        return { ...d, x, y, shift: e.shiftKey, alt: e.altKey };
-      });
+        if (!far || !d.obj || !editable) return;
+        const [ghost, hole] = cutOut(d.obj);
+        if (d.obj.id !== selected) p.onSelect(d.obj, "set");
+        setDrag({ ...d, x, y, started: true, ghost, hole, shift: e.shiftKey, alt: e.altKey });
+        return;
+      }
+      setDrag({ ...d, x, y, shift: e.shiftKey, alt: e.altKey });
+    };
+    // Shift and Alt pressed or let go without moving the mouse change the ghost too
+    const keys = (e: KeyboardEvent) => {
+      // (App's Escape, which clears the selection, listens on window too)
+      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); cancel(); return; }
+      if ((e.key === "Shift" || e.key === "Alt") && drag.started) {
+        if (e.key === "Alt") e.preventDefault();  // no menu bar focus on Windows
+        setDrag({ ...drag, shift: e.shiftKey, alt: e.altKey });
+      }
     };
     const up = (e: MouseEvent) => {
       const d = drag;
       setDrag(null);
-      if (!d) return;
       if (!d.started) {
         // a click: select, shift-click adds, alt-click goes up to the group
         const o = d.picked;
@@ -412,24 +432,34 @@ export function Canvas(p: Props) {
           let up = o;
           if (sel && ancestorsOf(o).has(objects.indexOf(sel)) || sel === o) up = sel ?? o;
           const q = up.parent !== undefined ? objects[up.parent] : null;
-          p.onSelect(q ?? o, "set");
+          p.onSelect(q ?? up, "set");   // already at the top: stay there
         } else p.onSelect(o, e.shiftKey ? "toggle" : "set");
         return;
       }
-      const g = solve({ ...d, shift: e.shiftKey, alt: e.altKey });
+      // the frame changed under the drag (playback, a seek, an undo, a reload),
+      // or editing stopped: the gesture belongs to a picture that is gone
+      if (d.url !== url || !editable) return;
+      // what was drawn is what is sent: the modifiers of the last move or key
+      const g = solve(d);
       const nothing = g.kind === "move" ? Math.abs(g.dx) < 1e-3 && Math.abs(g.dy) < 1e-3
         : g.kind === "scale" ? Math.abs(g.k - 1) < 1e-3 : Math.abs(g.deg) < 0.01;
       if (nothing) return;
-      setHeld({ ...d, shift: e.shiftKey, alt: e.altKey });
+      setHeld(d);
       p.onGesture(g);
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
+    window.addEventListener("keydown", keys, true);
+    window.addEventListener("keyup", keys, true);
+    window.addEventListener("blur", cancel);
     return () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
+      window.removeEventListener("keydown", keys, true);
+      window.removeEventListener("keyup", keys, true);
+      window.removeEventListener("blur", cancel);
     };
-  }, [drag, objects, selected, editable]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [drag, objects, selected, editable, url]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onHover = (e: React.MouseEvent) => {
     if (drag) return;
@@ -449,8 +479,10 @@ export function Canvas(p: Props) {
     } catch { return null; }
   };
   const onDragOver = (e: React.DragEvent) => {
+    // while editing is off the drop is still taken, and App says why nothing happens
     if (!e.dataTransfer.types.includes("application/x-studio")) return;
     e.preventDefault();
+    if (!editable) { setDropAt(null); return; }
     e.dataTransfer.dropEffect = "copy";
     const [x, y] = toCanvas(e);
     const o = pickAt(x, y);
@@ -477,19 +509,23 @@ export function Canvas(p: Props) {
   };
 
   return (
+    // the box takes the stage's free space; the canvas is the largest
+    // width/height rectangle inside it, so the frame is never stretched
+    <div className="canvas-box">
     <div className={`canvas ${stale ? "stale" : ""}`} ref={wrap}
-      style={{ aspectRatio: `${width} / ${height}` }}
+      style={{ "--ar": `${width / height}` } as React.CSSProperties}
       onMouseDown={onDown}
       onMouseMove={onHover}
       onMouseLeave={() => setHover(null)}
       onDragOver={onDragOver}
-      onDragLeave={() => setDropAt(null)}
+      onDragLeave={() => { setDropAt(null); setHover(null); }}
       onDrop={onDrop}>
       {shown && <img ref={img} src={shown} alt="frame" draggable={false} />}
       <canvas ref={overlay} width={width} height={height} />
       {hover && !drag && <div className="hover-tag">{hover.name ?? hover.class}{hover.tier === 3 ? " 🔒" : ""}</div>}
       {failed ? <div className="frame-msg">⚠ This frame didn't render: {failed}</div>
         : slow ? <div className="frame-msg">Rendering this frame…</div> : null}
+    </div>
     </div>
   );
 }

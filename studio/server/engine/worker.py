@@ -135,7 +135,7 @@ class Worker:
                 tr, c = eng.trace(msg["scene"], t, True)
                 out = {"trace": tr}
                 if tr["error"] is None and c is not None:
-                    _group_boxes(c.objects)
+                    # (no boxes here: only centres and sites are compared)
                     out["object"] = next((o for o in c.objects if o["id"] == msg.get("object")), None)
                     out["objects"] = c.objects
             else:

@@ -9,7 +9,9 @@ called "Manim Studio", so a real name is needed before any public release.
 
 Status: Phase 0 done (go). Phase 1 done: wireframes and code specification
 approved 2026-11-18. Phase 2 done 2026-11-18: exit criteria met
-(`docs/phase2/exit_report.md`). Phase 3 is next.
+(`docs/phase2/exit_report.md`). Phase 3 done 2026-11-18: exit criteria met
+(`docs/phase3/exit_report.md`), reviewed in `docs/review_phase3.md`. Phase 4
+is next.
 
 ## 1. Decisions already made
 

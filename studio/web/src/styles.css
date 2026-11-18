@@ -39,7 +39,8 @@ button.pri { background: var(--sel); border-color: var(--sel); color: #fff; }
 .lname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .badge { font-size: 10px; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; color: var(--dim); white-space: nowrap; }
 .stage { grid-row: 1; grid-column: 2; display: flex; flex-direction: column; min-height: 0; padding: 10px; gap: 6px; background: #101216; }
-.canvas { position: relative; max-width: 100%; max-height: calc(100% - 40px); margin: 0 auto; cursor: default; background: #000; flex: 1 1 auto; min-height: 0; }
+.canvas-box { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; container-type: size; }
+.canvas { position: relative; width: min(100cqw, calc(100cqh * var(--ar))); aspect-ratio: var(--ar); flex: none; cursor: default; background: #000; }
 .canvas img, .canvas canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .canvas.stale img { opacity: .35; filter: grayscale(1); }
 .canvas-placeholder { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); border: 1px dashed var(--line); }
@@ -124,3 +125,4 @@ input.dirty { border-color: #c9a23a; }
 .app { user-select: none; }
 .code, input, textarea, .note, .toast { user-select: text; }
 .alt-head { margin: 10px 0 4px; color: var(--dim); font-size: 12px; }
+.modal:focus { outline: none; }

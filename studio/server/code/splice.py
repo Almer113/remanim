@@ -149,10 +149,11 @@ def _remove_argument(src: Source, call: ast.Call, kw: ast.keyword) -> Edit:
     i = next(j for j, n in enumerate(args) if n is kw)
     a, b = src.span(kw)
     # alone on its own line(s), as in a one-per-line call: drop the lines
-    first = src.line_text(kw.lineno)
-    last = src.line_text(kw.end_lineno)
-    if kw.lineno > call.lineno and first[: kw.col_offset].strip() == "" and             last[kw.end_col_offset:].strip() in ("", ",") and kw.end_lineno < call.end_lineno:
-        if i == len(args) - 1 and last[kw.end_col_offset:].strip() == "" and i > 0:
+    head = src.before(kw.lineno, kw.col_offset)      # byte columns, not str indices
+    tail = src.after(kw.end_lineno, kw.end_col_offset)
+    if kw.lineno > call.lineno and head.strip() == "" and \
+            tail.strip() in ("", ",") and kw.end_lineno < call.end_lineno:
+        if i == len(args) - 1 and tail.strip() == "" and i > 0:
             # last argument without a trailing comma: remove ",<nl>  kw"
             _, prev_end = src.span(args[i - 1])
             return Edit(prev_end, b, "")

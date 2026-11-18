@@ -72,6 +72,18 @@ class Source:
         b = self.line_starts[line] if line < len(self.line_starts) else len(self.data)
         return self.data[a:b].decode("utf-8").rstrip("\r\n")
 
+    def before(self, line: int, col: int) -> str:
+        """The text of `line` before byte column `col` (ast columns are UTF-8
+        byte offsets, not str indices)."""
+        a = self.line_starts[line - 1]
+        return self.data[a:a + col].decode("utf-8", "replace")
+
+    def after(self, line: int, col: int) -> str:
+        """The text of `line` from byte column `col` to its end, newline excluded."""
+        a = self.line_starts[line - 1]
+        b = self.line_starts[line] if line < len(self.line_starts) else len(self.data)
+        return self.data[a + col:b].decode("utf-8", "replace").rstrip("\r\n")
+
     def line_end(self, line: int) -> int:
         """Byte offset just after the line's newline (or end of file)."""
         return self.line_starts[line] if line < len(self.line_starts) else len(self.data)

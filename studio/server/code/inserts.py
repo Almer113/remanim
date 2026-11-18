@@ -128,6 +128,7 @@ class Slot:
     note: str = ""
     tail: str = ""           # a statement after the new lines (the rest of a split wait)
     absorbs: float = 0.0     # seconds of the split wait the new play() uses up
+    at_needed: bool = True   # TimedScene: write `self.at(t)` (False: the play starts later, as is)
 
 
 def _stmt_times(src: Source, fn, events: list) -> dict[int, list]:
@@ -166,6 +167,9 @@ def slot(src: Source, fn, events: list, t: float, fps: float, timed: bool, run_t
     body = fn.body
     if len(body) == 1 and isinstance(body[0], ast.Pass):
         p = body[0]
+        if p.lineno == fn.lineno:
+            raise EditError(f"construct() is written on one line (line {fn.lineno}); "
+                            "put its body on its own line first")
         a = src.line_starts[p.lineno - 1]
         return Slot([], a, src.indent_of(p.lineno), t if timed else 0.0,
                     replace_pass=Edit(a, src.line_end(p.end_lineno), ""))
@@ -198,11 +202,16 @@ def slot(src: Source, fn, events: list, t: float, fps: float, timed: bool, run_t
                     sl = _before(src, body, j, a, False, t)
                     sl.edits_before, sl.start, sl.absorbs = [Edit(ws, we, fmt(rest, src.text(lit)))], a, absorbs
                     return sl
+                # the new play() uses up the whole wait: remove it, or (when it
+                # shares its line or is alone in its block) make it a `pass`;
+                # never `wait(0)`, which Manim refuses
                 e = _remove_stmt_edit(src, st)
-                if e is not None:
-                    sl = _before(src, body, j, a, False, t)
-                    sl.edits_before, sl.start, sl.absorbs = [e], a, absorbs
-                    return sl
+                if e is None:
+                    s0, s1 = src.span(st)
+                    e = Edit(s0, s1, "pass")
+                sl = _before(src, body, j, a, False, t)
+                sl.edits_before, sl.start, sl.absorbs = [e], a, absorbs
+                return sl
             edits = [Edit(ws, we, fmt(first, src.text(lit)))]
             tail = f"{indent}self.wait({fmt(rest, src.text(lit))}){nl}" if rest >= frame else ""
             return Slot(edits, src.line_end(st.end_lineno), indent, a + first, tail=tail, absorbs=absorbs)
@@ -215,9 +224,10 @@ def slot(src: Source, fn, events: list, t: float, fps: float, timed: bool, run_t
             # `self.at(3)` waiting through t: the new self.at(t) goes before it
             return _before(src, body, j, prev_end, timed, t)
         # t is inside a play() or something else that runs: start right after it
+        # (in a TimedScene too: `self.at(t)` for a time already past would do nothing)
         e = max(x for _, x, _ in times[id(st)])
-        return Slot([], src.line_end(st.end_lineno), src.indent_of(st.lineno), max(t, e) if timed else e,
-                    note=f"; starts at {e:.2f} s, when the play() at line {st.lineno} ends")
+        return Slot([], src.line_end(st.end_lineno), src.indent_of(st.lineno), e,
+                    note=f"; starts at {e:.2f} s, when the play() at line {st.lineno} ends", at_needed=False)
 
 
 def _is_self_stmt(st, method: str) -> bool:
@@ -236,9 +246,14 @@ def _before(src, body, j, prev_end, timed, t) -> Slot:
     return Slot([], src.line_end(prev.end_lineno), src.indent_of(prev.lineno), t if timed else prev_end)
 
 
+def _start(sl: Slot, t: float, timed: bool) -> float:
+    """When the new play() really starts."""
+    return t if timed and sl.at_needed else max(sl.start, t)
+
+
 def _timeline_lines(sl: Slot, t: float, timed: bool, fps: float, play: str) -> list[str]:
     lines = []
-    if timed and t > 1 / fps:
+    if timed and sl.at_needed and t > 1 / fps:
         lines.append(f"self.at({fmt(round(t, 2))})")
     elif not timed and t - sl.start > 1 / fps:
         lines.append(f"self.wait({fmt(round(t - sl.start, 2))})")
@@ -258,14 +273,19 @@ def _pushed(sl: Slot, t: float, timed: bool, fps: float, run_time: float, events
     return sl.note
 
 
+def _lead(src: Source, at: int) -> str:
+    """A newline first when inserting after a last line that has none."""
+    return src.newline if at > 0 and src.data[at - 1:at] != b"\n" else ""
+
+
 def _emit(src: Source, sl: Slot, lines: list[str], extra: list | None = None) -> list[Edit]:
     nl = src.newline
     text = "".join(f"{sl.indent}{ln}{nl}" for ln in lines) + sl.tail
     edits = list(sl.edits_before) + list(extra or [])
     if sl.replace_pass is not None:
-        edits.append(Edit(sl.replace_pass.start, sl.replace_pass.end, text))
+        edits.append(Edit(sl.replace_pass.start, sl.replace_pass.end, _lead(src, sl.replace_pass.start) + text))
     else:
-        edits.append(Edit(sl.at, sl.at, text))
+        edits.append(Edit(sl.at, sl.at, _lead(src, sl.at) + text))
     return edits
 
 
@@ -298,7 +318,7 @@ def plan_insert(src: Source, scene: str, events: list, fps: float, timed: bool, 
         e = import_edit(src, "manim_kit")
         if e is not None:
             extra.append(e)
-    start = t if timed else max(sl.start, t)
+    start = _start(sl, t, timed)
     return Plan(_emit(src, sl, lines, extra),
                 f"{name} = {cls}(...) and {entrance or 'add'}() at {start:.2f} s"
                 f"{_pushed(sl, t, timed, fps, rt, events)}",
@@ -316,24 +336,37 @@ def plan_preset(src: Source, scene: str, events: list, fps: float, timed: bool, 
     rt = RUN_TIME.get(preset, 1.0)
     sl = slot(src, fn, events, t, fps, timed, rt)
     lines = _timeline_lines(sl, t, timed, fps, f"self.play({preset}({expr}), run_time={fmt(rt)})")
-    start = t if timed else max(sl.start, t)
+    start = _start(sl, t, timed)
     return Plan(_emit(src, sl, lines), f"{preset}({expr}) at {start:.2f} s{_pushed(sl, t, timed, fps, rt, events)}",
                 checks={"start": start, "run_time": rt})
 
 
 def reference(src: Source, obj: dict, fn) -> str:
     """A name (or `group[i]`) for `obj` that is in scope in `fn`."""
+    return reference_at(src, obj, fn)[0]
+
+
+def reference_at(src: Source, obj: dict, fn) -> tuple[str, ast.stmt]:
+    """The name for `obj` and the statement that binds it to this object
+    (not just any assignment of that name: names get reused)."""
     named = assigned_name(src, obj.get("site"))
     if named and function_of(src, named[1]) is fn:
-        return named[0]
+        return named
     for sp in obj.get("chain_spans") or []:
         r = assigned_name(src, sp)
         if r and function_of(src, r[1]) is fn:
-            return r[0]
+            return r
     ov = override_target(src, obj)
     if ov and function_of(src, ov[1]) is fn:
-        return ov[0]
+        return ov
     raise EditError("this object isn't stored in a variable in construct(); name it in the code first")
+
+
+def _assigns(node, name: str) -> bool:
+    return any(isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For)) and any(
+        isinstance(t, ast.Name) and t.id == name
+        for tg in (n.targets if isinstance(n, ast.Assign) else [n.target]) for t in ast.walk(tg))
+        for n in ast.walk(node))
 
 
 # -- duplicate and group ------------------------------------------------------------------
@@ -347,7 +380,7 @@ def plan_duplicate(src: Source, scene: str, events: list, fps: float, timed: boo
     sl = slot(src, fn, events, t, fps, timed, rt)
     lines = [f"{name} = {expr}.copy().shift({delta_expr(dx, dy)})"] + \
         _timeline_lines(sl, t, timed, fps, f"self.play(FadeIn({name}), run_time={fmt(rt)})")
-    start = t if timed else max(sl.start, t)
+    start = _start(sl, t, timed)
     return Plan(_emit(src, sl, lines),
                 f"{name} = {expr}.copy() at {start:.2f} s{_pushed(sl, t, timed, fps, rt, events)}",
                 checks={"name": name, "start": start, "run_time": rt})
@@ -359,35 +392,28 @@ def plan_group(src: Source, scene: str, objs: list[dict]) -> Plan:
     fn = scene_construct(src, scene)
     exprs, binds = [], []
     for o in objs:
-        e = reference(src, o, fn)
+        e, st = reference_at(src, o, fn)
         if e in exprs:
             continue
         exprs.append(e)
-        root = re.sub(r"\[.*", "", e)
-        st = _binding(src, fn, root)
-        if st is None:
-            raise EditError(f"can't find where {root} is made in construct()")
-        binds.append(st)
+        binds.append((re.sub(r"\[.*", "", e), st))
     # after the later of the creations, at construct()'s own level
-    tops = [_top(src, fn, st) for st in binds]
-    after = max(tops, key=lambda s: s.end_lineno)
+    tops = [(root, _top(src, fn, st)) for root, st in binds]
+    after = max((t for _, t in tops), key=lambda s: s.end_lineno)
+    i_after = fn.body.index(after)
+    for root, top in tops:
+        # the name must still mean this object where the group is made
+        later = fn.body[fn.body.index(top) + 1:i_after + 1]
+        hit = next((s for s in later if _assigns(s, root)), None)
+        if hit is not None:
+            raise EditError(f"{root} is given a new value at line {hit.lineno}; group them in the code")
     name = fresh_name(src, "group")
     nl = src.newline
     indent = src.indent_of(after.lineno)
     at = src.line_end(after.end_lineno)
-    return Plan([Edit(at, at, f"{indent}{name} = VGroup({', '.join(exprs)}){nl}")],
+    return Plan([Edit(at, at, f"{_lead(src, at)}{indent}{name} = VGroup({', '.join(exprs)}){nl}")],
                 f"{name} = VGroup({', '.join(exprs)}) after line {after.end_lineno}",
                 checks={"name": name, "members": exprs})
-
-
-def _binding(src: Source, fn, name: str):
-    for n in ast.walk(fn):
-        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets):
-            return n
-        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(
-                isinstance(e, ast.Name) and e.id == name for e in t.elts) for t in n.targets):
-            return n
-    return None
 
 
 def _top(src: Source, fn, st):
@@ -426,6 +452,11 @@ def _remove_stmts(src: Source, stmts: list) -> list[Edit]:
     ids = {id(s) for s in stmts}
     for st in stmts:
         blk = block_of(src, st)
+        head = src.parent(st)
+        if head is not None and not isinstance(head, ast.Module) and getattr(head, "lineno", None) == st.lineno:
+            # `with self.voiceover(...): self.play(...)`: removing the line would take the header too
+            raise EditError(f"line {st.lineno} puts the statement on the same line as its "
+                            f"{type(head).__name__.lower()}; delete it in the code")
         if blk is not None and all(id(s) in ids for s in blk) and st is blk[0]:
             # the whole block goes: keep it valid Python
             a = src.line_starts[st.lineno - 1]
@@ -473,6 +504,9 @@ def plan_delete(src: Source, scene: str, obj: dict, api: set) -> Plan:
     if not named or function_of(src, named[1]) is not fn:
         return _delete_inline(src, fn, obj)
     name, made = named
+    # names the file assigns itself are the user's, even if a library also exports
+    # them (`rotation`, `scene`, `camera`)
+    api = set(api) - {n.id for n in ast.walk(src.tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     if not any(s is made for s in fn.body):
         raise EditError(f"{name} is made inside a block (line {made.lineno}); delete it in the code")
     gone, arg_edits, readers = [made], [], []

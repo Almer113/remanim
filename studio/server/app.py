@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import warnings
 from pathlib import Path
 
 from aiohttp import WSMsgType, web
@@ -45,6 +46,9 @@ async def local_only(req: web.Request, handler):
     origin = req.headers.get("Origin")
     if origin is not None and origin not in DEV_ORIGINS and not _same_server(origin, req.host):
         raise web.HTTPForbidden(text="cross-origin requests are not allowed")
+    # `<img src="http://127.0.0.1:8770/frame?...">` on another site sends no Origin
+    if req.headers.get("Sec-Fetch-Site") == "cross-site" and origin not in DEV_ORIGINS:
+        raise web.HTTPForbidden(text="cross-site requests are not allowed")
     return await handler(req)
 
 
@@ -76,7 +80,9 @@ def scene_files() -> list[dict]:
     for p in sorted(paths, key=lambda x: rel(x)):
         r = rel(p)
         try:
-            tree = ast.parse(p.read_bytes())
+            with warnings.catch_warnings():   # other people's files: `'\i'` escapes and the like
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(p.read_bytes())
         except (SyntaxError, ValueError):
             out.append({"path": r, "scenes": [], "error": "doesn't parse"})
             continue
@@ -118,10 +124,21 @@ class Hub:
         self.docs[doc.name] = doc
         if self.api is None:
             r = await doc.worker.request({"op": "hello"})
-            self.api = r.get("api", [])
-        doc.api = set(self.api)
-        asyncio.create_task(doc.load())
+            if r.get("api"):   # a cold first import can time out: never cache "no names"
+                self.api = r["api"]
+        doc.api = set(self.api or ())
+        asyncio.create_task(self._load(doc))
         return doc
+
+    async def _load(self, doc: Document):
+        await doc.load()
+        if self.api is None:   # hello failed: ask again now the worker is warm
+            r = await doc.worker.request({"op": "hello"})
+            if r.get("api"):
+                self.api = r["api"]
+                doc.api = set(self.api)
+                doc._census = None   # tiers depend on which names are the library's
+                await doc.send_model()
 
     # -- file watching --------------------------------------------------------
     def start_watching(self):
@@ -257,6 +274,10 @@ async def new_file(msg: dict) -> dict:
         or "NewScene"
     if not scene[0].isalpha():
         scene = "Scene" + scene
+    from .code.inserts import SHAPES
+    if scene in set(hub.api or ()) | set(SHAPES) | {"Scene", "TimedScene", "VGroup", "Group"}:
+        # circle.py must not define `class Circle`: the next Circle dropped in would make the scene
+        scene += "Scene"
     try:
         text = new_file_text(scene)
         path.parent.mkdir(parents=True, exist_ok=True)

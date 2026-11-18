@@ -501,7 +501,12 @@ class Document:
         i = 0
         while i < len(cands) and i < 5:
             c = cands[i]
-            new = apply(self.data, c.edits)
+            try:
+                new = apply(self.data, c.edits)
+            except EditError as e:   # one bad candidate must not stop the next ones
+                tried.append(f"{c.note}: {e}")
+                i += 1
+                continue
             if not Source(new).ok:
                 tried.append(f"{c.note}: would not parse")
                 i += 1

@@ -14,7 +14,8 @@ interface Alt { token: string; summary: string; diff: DiffHunk[]; label: string 
 interface Preview { token: string; summary: string; why: string; diff: DiffHunk[]; also: string[]; alts: Alt[] }
 export type Selection =
   | { kind: "object"; obj: Obj }
-  | { kind: "clip"; clip: number; anim: number | null }
+  // `line` and `text` find the clip again after an edit moves the indexes
+  | { kind: "clip"; clip: number; anim: number | null; line?: number | null; text?: string | null }
   | null;
 
 export function App() {
@@ -152,6 +153,20 @@ export function App() {
     return () => { gone = true; clearInterval(id); };
   }, [model?.file]);
 
+  // a clip is selected by index, and edits (an insert above it, undo) move indexes:
+  // find the same clip again in every new model, or let it go
+  useEffect(() => {
+    if (sel?.kind !== "clip" || !scene || scene.pending) return;
+    const at = scene.clips[sel.clip];
+    if (at && at.line === sel.line && at.text === sel.text) return;
+    const same = scene.clips.map((c, i) => [c, i] as const).filter(([c]) => c.text === sel.text);
+    const byLine = scene.clips.findIndex((c) => c.line === sel.line);
+    const pick = same.length ? same.reduce((a, b) => Math.abs(b[1] - sel.clip) < Math.abs(a[1] - sel.clip) ? b : a)[1]
+      : at && at.line === sel.line ? sel.clip : byLine >= 0 && sel.text === undefined ? byLine : -1;
+    if (pick < 0) setSel(null);
+    else if (pick !== sel.clip) setSel({ ...sel, clip: pick, line: scene.clips[pick].line, text: scene.clips[pick].text });
+  }, [scene]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const selectedClip: Clip | null = sel?.kind === "clip" && scene && !scene.pending ? scene.clips[sel.clip] ?? null : null;
   const peekSpan = sel?.kind === "object" ? (sel.obj.site ?? sel.obj.user_site)
     : selectedClip ? selectedClip.call : null;
@@ -212,11 +227,15 @@ export function App() {
     }
   }, [toast]);
 
-  const sendEdit = useCallback((msg: object) => {
-    if (!model || !scene) return;
+  // one edit at a time, and none while a preview waits for an answer
+  const sendEdit = useCallback((msg: object): Promise<any> | null => {
+    if (!model || !scene || busy || preview) return null;
     setBusy(true);
-    conn.request({ ...msg, file: model.file, scene: scene.name, rev: model.rev }).then(handleReply);
-  }, [model, scene, handleReply]);
+    return conn.request({ ...msg, file: model.file, scene: scene.name, rev: model.rev }).then((r) => {
+      handleReply(r);
+      return r;
+    });
+  }, [model, scene, handleReply, busy, preview]);
 
   const select = useCallback((o: Obj | null, how: "set" | "toggle" = "set") => {
     if (!o) { setSel(null); setOthers([]); return; }
@@ -238,7 +257,11 @@ export function App() {
   }, [sendEdit, f]);
 
   const onDrop = useCallback((item: LibItem, x: number, y: number, on: Obj | null) => {
-    if (!canEdit) return;
+    if (!canEdit) {
+      toast("info", busy ? "Wait for the edit in progress" : playing || !rest ? "Pause first, then drop"
+        : "Editing is paused (see the status above)");
+      return;
+    }
     if (item.kind === "shape") {
       sendEdit({ type: "edit.insert", class: item.class, x, y, f, ...(item.entrance ? { entrance: item.entrance } : {}) });
     } else if (on) {
@@ -246,7 +269,7 @@ export function App() {
     } else {
       toast("info", `Drop ${item.preset} on an object`);
     }
-  }, [canEdit, sendEdit, f, toast]);
+  }, [canEdit, sendEdit, f, toast, busy, playing, rest]);
 
   const onPick = useCallback((item: LibItem) => {
     if (item.kind === "shape") onDrop(item, 0, 0, null);
@@ -257,21 +280,36 @@ export function App() {
   const selectedObjs = sel?.kind === "object"
     ? [sel.obj, ...others.map((id) => objects.find((o) => o.id === id)).filter((o): o is Obj => !!o)] : [];
 
+  // the same rules for keys and Inspector buttons
+  const objLocked = sel?.kind === "object" && (!sel.obj.site || sel.obj.tier === 3);
+  const objReady = canEdit && sel?.kind === "object" && selOnScreen;
+  const offScreenNote = () => toast("info", "Not on screen at this frame: move the playhead to where it shows");
+
   const doDelete = useCallback(() => {
     if (!canEdit || !sel) return;
-    if (sel.kind === "object") sendEdit({ type: "edit.delete", object: sel.obj, f });
-    else sendEdit({ type: "edit.delete_clip", clip: sel.clip, anim: sel.anim });
-    setSel(null);
-    setOthers([]);
-  }, [canEdit, sel, sendEdit, f]);
+    if (sel.kind === "object" && !selOnScreen) { offScreenNote(); return; }
+    const p = sel.kind === "object" ? sendEdit({ type: "edit.delete", object: sel.obj, f })
+      : sendEdit({ type: "edit.delete_clip", clip: sel.clip, anim: sel.anim });
+    // keep the selection if the delete is refused
+    p?.then((r) => { if (r?.type === "edit.done") { setSel(null); setOthers([]); } });
+  }, [canEdit, sel, sendEdit, f, selOnScreen]); // eslint-disable-line react-hooks/exhaustive-deps
   const doDuplicate = useCallback(() => {
-    if (canEdit && sel?.kind === "object") sendEdit({ type: "edit.duplicate", object: sel.obj, f });
-  }, [canEdit, sel, sendEdit, f]);
+    if (!canEdit || sel?.kind !== "object") return;
+    if (!selOnScreen) { offScreenNote(); return; }
+    if (objLocked || sel.obj.virtual) { toast("info", "This one can't be duplicated from the studio"); return; }
+    sendEdit({ type: "edit.duplicate", object: sel.obj, f });
+  }, [canEdit, sel, sendEdit, f, selOnScreen, objLocked]); // eslint-disable-line react-hooks/exhaustive-deps
   const doGroup = useCallback(() => {
-    if (!canEdit) return;
+    if (!objReady) { if (canEdit && sel?.kind === "object") offScreenNote(); return; }
     if (selectedObjs.length < 2) { toast("info", "Shift-click a second object to group them"); return; }
     sendEdit({ type: "edit.group", objects: selectedObjs, f });
-  }, [canEdit, selectedObjs, sendEdit, f, toast]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [objReady, canEdit, sel, selectedObjs, sendEdit, f, toast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const cancelPreview = useCallback(() => {
+    if (!preview) return;
+    for (const t of [preview.token, ...preview.alts.map((a) => a.token)]) conn.send({ type: "edit.cancel", file: model?.file, token: t });
+    setPreview(null);
+  }, [preview, model?.file]);
 
   const newFile = useCallback(() => {
     const name = window.prompt("New scene file (inside the project), e.g. my_scene.py", "my_scene.py");
@@ -296,7 +334,12 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
-      if (preview) return;  // the confirm dialog is open
+      if (preview) {  // the confirm dialog is open: Escape cancels it, nothing else
+        if (e.key === "Escape") cancelPreview();
+        return;
+      }
+      // Backspace deletes only when nothing has focus (not after clicking a button)
+      if (e.key === "Backspace" && e.target !== document.body) return;
       if (e.key === " ") {
         e.preventDefault();
         if (ready) togglePlay();
@@ -326,7 +369,14 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup]);
+  }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // the dialog takes the focus (not a button: a second Enter from the field
+  // must not answer it unread); Tab reaches the buttons, Escape cancels
+  const modalRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (preview) modalRef.current?.focus();
+  }, [preview]);
 
   return (
     <div className="app">
@@ -408,7 +458,7 @@ export function App() {
           </section>
 
           <aside className="panel inspector">
-            <Inspector sel={sel} scene={scene && !scene.pending ? scene : null} model={model} busy={busy} f={f}
+            <Inspector sel={sel} scene={scene && !scene.pending ? scene : null} model={model} busy={busy || !!preview} f={f}
               onScreen={sel?.kind !== "object" || selOnScreen} sendEdit={sendEdit}
               actions={{ remove: doDelete, duplicate: doDuplicate, group: doGroup, count: selectedObjs.length }} />
           </aside>
@@ -417,7 +467,8 @@ export function App() {
             {scene && !scene.pending && (
               <Timeline scene={scene} f={f} fps={fps} nFrames={nFrames}
                 sel={sel} onSeek={seek}
-                onSelectClip={(clip, anim) => setSel({ kind: "clip", clip, anim })}
+                onSelectClip={(clip, anim) => setSel({ kind: "clip", clip, anim, line: scene.clips[clip]?.line,
+                  text: scene.clips[clip]?.text })}
                 selectedObjectId={sel?.kind === "object" ? sel.obj.id : null}
                 onTrim={(clip, anim, d) => sendEdit({ type: "edit.timing", clip, anim, field: "duration", value: d })}
               />
@@ -432,7 +483,7 @@ export function App() {
 
       {preview && (
         <div className="modal-back">
-          <div className="modal">
+          <div className="modal" ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true">
             <h4>Check this edit first</h4>
             <p>{preview.why}</p>
             {preview.also.length > 0 && <p className="note">This also moves: {preview.also.join(", ")}</p>}
@@ -444,10 +495,7 @@ export function App() {
               </div>
             ))}
             <div className="btns">
-              <button onClick={() => {
-                for (const t of [preview.token, ...preview.alts.map((a) => a.token)]) conn.send({ type: "edit.cancel", file: model?.file, token: t });
-                setPreview(null);
-              }}>Cancel</button>
+              <button onClick={cancelPreview}>Cancel</button>
               {preview.alts.map((a) => (
                 <button key={a.token} onClick={() => {
                   setBusy(true);

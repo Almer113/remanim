@@ -170,3 +170,37 @@ def test_only_this_one_property_override():
         finally:
             doc.close()
     run(go())
+
+
+def test_animate_in_a_multi_line_play_edits_the_animate_vector():
+    """The house style splits self.play( over lines; _MethodAnimation.finish()
+    must not hide the .animate record (review after Phase 3, engine #1)."""
+    async def go():
+        TMP.mkdir(parents=True, exist_ok=True)
+        path = TMP / "animate_multiline.py"
+        code = ("from manim import *\n\n\nclass A(Scene):\n    def construct(self):\n"
+                "        c = Circle()\n        d = Dot()\n        self.add(c, d)\n"
+                "        self.play(\n            c.animate.shift(RIGHT),\n            run_time=1,\n        )\n"
+                "        move = d.animate.shift(UP)\n        self.play(move)\n        self.wait(1)\n")
+        path.write_text(code, encoding="utf-8", newline="\n")
+        doc = Document(path, [], _quiet)
+        try:
+            await doc.load()
+            f = int(2.5 * doc.meta["fps"])
+            objs = await _objects(doc, "A", f)
+            for cls, before, after in [("Circle", "c.animate.shift(RIGHT)", "c.animate.shift(RIGHT + 0.5 * UP)"),
+                                       ("Dot", "d.animate.shift(UP)", "d.animate.shift(0.5 * RIGHT + UP)")]:
+                o = _find(objs, cls)
+                assert o["placement"]["move"]["kind"] == "animate", o["placement"]["move"]
+                dx, dy = (0, 0.5) if cls == "Circle" else (0.5, 0)
+                r = await _edit(doc, {"type": "edit.move", "scene": "A", "object": o, "f": f, "dx": dx, "dy": dy})
+                assert after in path.read_text(encoding="utf-8"), (r, path.read_text(encoding="utf-8"))
+                objs = await _objects(doc, "A", f)
+            while doc.undo:
+                r = await doc.undo_redo("undo")
+                assert r["type"] == "edit.done", r
+            assert path.read_text(encoding="utf-8") == code
+        finally:
+            doc.close()
+            path.unlink(missing_ok=True)
+    run(go())

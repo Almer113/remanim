@@ -49,6 +49,8 @@ def _renum(src: Source, node, value: float) -> Edit:
     a, b = src.span(node)
     old = src.text(node).lstrip("+-")
     v = round(float(value), 4)
+    # `2 -> 2.5 -> 2` and `2.0 -> 2.5 -> 2.0` pass through the same text, so
+    # one must lose: whole numbers are far more common, so `2.0` comes back `2`
     whole_point = old.replace(".", "", 1).isdigit() and "." in old and float(old) == int(float(old))
     like = old if (v != int(v) or whole_point) else None
     return Edit(a, b, fmt(v, like))
@@ -130,8 +132,11 @@ def remove_statement(src: Source, stmt) -> Edit | None:
     blk = block_of(src, stmt)
     if blk is None or len(blk) < 2:
         return None
-    first, last = src.line_text(stmt.lineno), src.line_text(stmt.end_lineno)
-    if first[: stmt.col_offset].strip() or last[stmt.end_col_offset:].strip().lstrip(";").strip():
+    if src.before(stmt.lineno, stmt.col_offset).strip():
+        return None
+    rest = src.after(stmt.end_lineno, stmt.end_col_offset).strip()
+    # a trailing comment belongs to the statement and goes with it
+    if rest.lstrip(";").strip() and not rest.startswith("#"):
         return None
     return Edit(src.line_starts[stmt.lineno - 1], src.line_end(stmt.end_lineno), "")
 
@@ -267,14 +272,25 @@ def edit_vector(src: Source, expr, dx: float, dy: float) -> list[Edit] | None:
     if not parsed and origin is not None and len(terms) == 1:
         a, b = src.span(expr)
         return [Edit(a, b, delta_expr(dx, dy))]
+    v = eval_vector(expr)
+    if v is not None and len(terms) > 1 and abs(v[0] + dx) < SNAP and abs(v[1] + dy) < SNAP:
+        # every term goes to zero: one edit, not two overlapping removals
+        a, b = src.span(expr)
+        return [Edit(a, b, "ORIGIN")]
     edits, removed = [], set()
     for axis, d in ((0, dx), (1, dy)):
         if abs(d) < EPS:
             continue
         cands = [p for p in parsed if DIRS[p[2]][axis] != 0]
         if not cands:
-            _, b = src.span(expr)
-            edits.append(Edit(b, b, f" + {delta_expr(d if axis == 0 else 0, d if axis == 1 else 0)}"))
+            a, b = src.span(expr)
+            term = delta_expr(d if axis == 0 else 0, d if axis == 1 else 0)
+            first = terms[0][1]
+            if axis == 0 and terms[0][0] > 0 and not isinstance(first, ast.UnaryOp):
+                # x before y, the way people write it (and how it was before a drag to 0)
+                edits.append(Edit(a, a, f"{term} + "))
+            else:
+                edits.append(Edit(b, b, f" + {term}"))
             continue
         # prefer a term with a written number, else the first one
         sign, node, name, coef, value = next((p for p in cands if p[3] is not None), cands[0])
@@ -430,7 +446,12 @@ def plan_scale_on(src: Source, mv: dict, k: float, about: str | None = None) -> 
         if c is None:
             continue
         new = number_of(c.args[0]) * k
-        if Source.call_name(c) == "scale" and abs(new - 1) < 1e-6:
+        # k arrives rounded (×3 then ×0.3333 gives 1.9998): a product this close
+        # to a two-decimal number is that number, so a drag back restores the text
+        r = round(new, 2)
+        if abs(new - r) <= 5e-4 * abs(new):
+            new = r
+        if Source.call_name(c) == "scale" and abs(new - 1) < SNAP:
             return _drop_or(src, c, lambda: [set_number(src, c.args[0], 1)]), \
                 f"{Source.call_name(c)}() removed (line {c.lineno})"
         return [_renum(src, c.args[0], new)], f"{Source.call_name(c)}() number changed (line {c.lineno})"
@@ -530,7 +551,11 @@ def override_target(src: Source, obj: dict) -> tuple[str, ast.stmt] | None:
     anc = p.get("ancestors") or []
     path: list[int] = []
     for a in anc:
-        path.insert(0, a["index"])
+        i = a.get("index") if isinstance(a, dict) else None
+        # the object comes from the client: only a plain index may reach the code
+        if type(i) is not int or i < 0:
+            return None
+        path.insert(0, i)
         named = assigned_name(src, a.get("site")) or _name_via_chain(src, a.get("chain"))
         if not named:
             continue
@@ -563,10 +588,8 @@ def override_target(src: Source, obj: dict) -> tuple[str, ast.stmt] | None:
 
 
 def _occurrence(oid: str | None) -> int | None:
-    try:
-        return int(str(oid).rsplit("#", 1)[1])
-    except (IndexError, ValueError):
-        return None
+    tail = str(oid).rsplit("#", 1)[-1] if "#" in str(oid) else ""
+    return int(tail) if tail.isascii() and tail.isdigit() else None
 
 
 def _later_in_block(src: Source, after, obj) -> ast.stmt:

@@ -57,7 +57,7 @@ def test_delta_expr():
 
 
 @pytest.mark.parametrize("before,d,after", [
-    ("UP * 0.5", (0.4, -0.25), "UP * 0.25 + 0.4 * RIGHT"),
+    ("UP * 0.5", (0.4, -0.25), "0.4 * RIGHT + UP * 0.25"),   # x first
     ("0.5 * UP", (0, 0.25), "0.75 * UP"),
     ("2 * RIGHT + DOWN", (0.5, 0), "2.5 * RIGHT + DOWN"),
     ("RIGHT", (0.4, 0), "1.4 * RIGHT"),
@@ -88,8 +88,8 @@ def test_literal_shift_numbers_and_back():
     m = mv(code, "Circle().to_corner(DL, buff=0.7).shift(UP * 0.5)", "shift")
     o = obj(code, "Circle()", m)
     out = first(code, move_candidates(Source(code.encode()), o, 0.4, -0.25))
-    assert "shift(UP * 0.25 + 0.4 * RIGHT)" in out
-    m2 = mv(out, "Circle().to_corner(DL, buff=0.7).shift(UP * 0.25 + 0.4 * RIGHT)", "shift")
+    assert "shift(0.4 * RIGHT + UP * 0.25)" in out
+    m2 = mv(out, "Circle().to_corner(DL, buff=0.7).shift(0.4 * RIGHT + UP * 0.25)", "shift")
     back = first(out, move_candidates(Source(out.encode()), obj(out, "Circle()", m2), -0.4, 0.25))
     assert back == code
 
