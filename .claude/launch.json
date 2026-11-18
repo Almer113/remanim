@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["preview_server.py"],
       "port": 8765
+    },
+    {
+      "name": "manim-studio",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "studio.server"],
+      "port": 8770
     }
   ]
 }

@@ -3,11 +3,15 @@
 How the studio proves its promises (PLAN.md section 3) on every change.
 The corpus is in [corpus.md](corpus.md).
 
-Test runner: `pytest` is **not** installed in the venv. Two options, decided
-at the start of Phase 2:
-- **Recommended:** install `pytest` into `.venv` (needs your OK). Standard,
-  good failure output, parametrises over corpus files.
-- Without it: the standard library's `unittest`, which works but is wordier.
+Test runner: `pytest` in `.venv` (approved for Phase 2):
+`.venv/Scripts/python -m pytest -q studio/tests`. The full corpus run is a
+script, not a test: `.venv/Scripts/python -u studio/tests/corpus_run.py`
+(about 20 minutes; report in `studio/tests/tmp/corpus_report.json`). Engine
+and round-trip tests start Manim workers that share `media/Tex_studio`, so
+don't run them while the studio server or another corpus run is busy.
+
+Status after Phase 2: unit, engine and round-trip suites exist; what is
+still missing from this plan is listed in `phase2/exit_report.md` section 5.
 
 Layout:
 

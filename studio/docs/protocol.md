@@ -11,6 +11,37 @@ separately.) Architecture: [architecture.md](architecture.md).
   The server ignores edits sent against an old revision and replies
   `error {code: "stale"}`; the client then has the new model already.
 
+## As built in Phase 2 (differences from the design below)
+
+The design below is the target; Phase 2 built a subset, and in places a
+simpler shape. Where they differ, this list is what the code does.
+
+- **Frames go over HTTP only.** No `seek` / `frame.ready` messages: the
+  client asks `GET /frame?...&f=` directly (browser cache + server LRU), and
+  `GET /objects?file&scene&rev&f` → `{objects, rev, f}` when the playhead
+  rests. The server drops nothing; a newer request simply finishes later.
+  Playback uses `size=half&fmt=jpeg`, prefetched while the worker is idle.
+- **`/api/status?file`** (polled, no `status` message):
+  `{cursors, of, cached, frames, restarts}`. `cursors` counts timeline spots
+  with a parked cursor, not live cursor threads (the pool refills a spot
+  after its cursor moves on, so threads can outnumber spots).
+- **Object ids have no end position:** `"Text@43:15#0"` (class, line:col of
+  the creating call, occurrence; `~` prefix when made inside library code).
+  An edit later on the same line keeps the id. No `remap` yet: the client
+  re-picks the selection by id after a reload.
+- **Clips are numbered** (`clip: <index>` in `edit.timing`), not ids.
+  `field` is `duration` or `rate_func`; an `anim` index targets one
+  animation inside a `play()`. A clip's `duration` is the code's number
+  (`wait(0.5)` → 0.5); `played` is that rounded to whole frames.
+- **`edit.prop`** sends the whole object (as `/objects` returned it) plus
+  `f`, and `value` is one of `{"number"}`, `{"name"}`, `{"string"}`,
+  `{"default": true}` (remove the keyword).
+- **Requests with `seq`** get the reply with the same `seq`; that is how the
+  client pairs `edit.*` replies. `model` and `file.changed` are pushed.
+- **Cursors are threads inside each file's worker process** (one process per
+  open file), not separate processes. Not built yet: `/audio`, `/source`
+  (the model carries `source`), `render`, `edit.move` and later edits.
+
 ## HTTP
 
 | Method & path | Returns |

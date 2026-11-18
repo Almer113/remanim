@@ -60,6 +60,11 @@ pane, not VS Code.
   `studio/PLAN.md`; read it before any studio work. It is separate from
   `preview_server.py`, shares no code with the videos, and nothing in it may
   break the preview or the check tools. `README.md` maps the whole folder.
+  Run it with launch config `manim-studio` (port 8770; rebuild the UI with
+  `npm run build` in `studio/web` after changing it). Tests:
+  `.venv/Scripts/python -m pytest -q studio/tests`; full corpus:
+  `studio/tests/corpus_run.py`. Its workers share `media/Tex_studio`, so
+  don't run studio tests while the studio server is busy.
 - `tools/compare.py` — reference | ours frames side by side at matching times
   (`--ours clip.mp4 --ref-start <s> --at t1 t2 ...`). Used for recreations.
 - `tools/analyze_reference.py` — contact sheets and cut list for a reference video.

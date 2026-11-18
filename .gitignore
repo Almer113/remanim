@@ -18,3 +18,8 @@ dist/
 
 # Studio spike scratch files
 studio/spikes/tmp/
+
+# Studio web build
+studio/web/node_modules/
+studio/web/dist/
+studio/tests/tmp/
