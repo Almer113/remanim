@@ -15,3 +15,6 @@ dist/
 
 # Local app settings
 .claude/settings.local.json
+
+# Studio spike scratch files
+studio/spikes/tmp/

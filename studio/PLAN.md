@@ -159,6 +159,10 @@ hard the core is.
 
 Throwaway prototypes that answer the questions the whole design rests on.
 
+**Status (2026-11-18): done, all bars met, recommendation go.** Results and
+plan changes: `studio/docs/phase0/go_no_go.md`, one write-up per spike next
+to it.
+
 | Spike | Question | Pass bar |
 |---|---|---|
 | S1 Frame at time | Can the engine show any moment of a scene quickly? | Median under 0.5 s for 2D scenes in this repo, under 2 s for 3D |
@@ -270,8 +274,10 @@ the preview and the check tools keep working unchanged.
 
 ## 9. Open questions (answered in Phase 0 or 1)
 
-- Overlapping clips: plain Manim or a small helper (S4)?
-- Should GUI-made scenes default to sequential code or to `at(t)` absolute time?
+- ~~Overlapping clips: plain Manim or a small helper (S4)?~~ Plain Manim, one
+  `play()` per overlap group, delays via a 3-line `clip()` helper (S4).
+- ~~Should GUI-made scenes default to sequential code or to `at(t)` absolute
+  time?~~ `at(t)` anchors in a `TimedScene`; sequential scenes stay editable (S4).
 - How should tier-2 overrides read in code so they stay obvious to a human?
 - What editable share is a realistic target for Phase 5 (after S5)?
 - How should the studio and the preview server avoid rendering the same file

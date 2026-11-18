@@ -34,11 +34,27 @@ class EdgeTTSService(SpeechService):
         initialize_speech_service(self, kwargs)
         self.voice, self.rate, self.pitch = voice, rate, pitch
 
+    def _input_data(self, text: str) -> dict:
+        return {"input_text": remove_bookmarks(text), "service": "edge-tts",
+                "voice": self.voice, "rate": self.rate, "pitch": self.pitch}
+
+    def _wrap_generate_from_text(self, text: str, **kwargs) -> dict:
+        # manim-voiceover appends a cache entry on EVERY call, cache hits
+        # included: cache.json grew by one copy per spoken line per render
+        # (934 entries for 95 lines), every say() re-parsed all of it, and
+        # two processes writing it at once corrupted it. A hit is returned
+        # as stored, without writing.
+        if kwargs.get("path") is None and self.global_speed == 1:
+            norm = " ".join(text.split())  # as the base class does
+            cached = self.get_cached_result(self._input_data(norm), self.cache_dir)
+            if cached is not None and "final_audio" in cached:
+                return cached
+        return super()._wrap_generate_from_text(text, **kwargs)
+
     def generate_from_text(self, text: str, cache_dir=None, path=None, **kwargs) -> dict:
         cache_dir = Path(cache_dir or self.cache_dir)
-        input_text = remove_bookmarks(text)
-        input_data = {"input_text": input_text, "service": "edge-tts",
-                      "voice": self.voice, "rate": self.rate, "pitch": self.pitch}
+        input_data = self._input_data(text)
+        input_text = input_data["input_text"]
 
         cached = self.get_cached_result(input_data, cache_dir)
         if cached is not None:

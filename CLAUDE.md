@@ -135,6 +135,9 @@ Never say a scene is done or fixed without running these and looking at the resu
   (free Microsoft neural voices, no key; the narration text goes to Microsoft).
   The voice is `en-US-AndrewNeural` at -5%. Audio is cached in
   `media/voiceovers/`, so only new or changed lines are synthesised.
+  `EdgeTTSService` overrides `_wrap_generate_from_text` so cache hits don't
+  write `cache.json`: manim-voiceover 0.4.0 appends an entry on every line,
+  hits included, which bloated and then corrupted the file. Keep the override.
 - Scenes subclass a `Beat(VoiceoverScene)` with a `say(spoken, caption=...)`
   context manager (see `pythagoras.py`). Animations inside the `with` block run
   during that line. Use `<bookmark mark='x'/>` in the spoken text plus
@@ -220,8 +223,11 @@ Full write-up: `docs/recreation_learnings.md`.
 - Don't `FadeIn`/`FadeOut` an `always_redraw` mobject whose number of parts
   changes while it animates (crash: zip length mismatch). Fade while still,
   then animate.
-- Animations inside one `play()` all get `play`'s `run_time`. To run a long
-  motion under shorter ones, drive it with an updater instead.
+- A `run_time=` on `play()` overrides every animation in it. Without one,
+  each keeps its own (`FadeIn(a, run_time=1)`, `b.animate(run_time=2)...`)
+  and the play lasts as long as the longest. Delay one with
+  `Succession(Wait(d), anim)`. `.animate....set_run_time()` does nothing.
+  A motion that must outlast its `play()` needs an updater.
 - A `wait()` with no time-based updater on screen (one that takes `dt`) is
   rendered as one frozen frame. Updaters without `dt` don't run during it, so
   anything they drive (a caption change, a readout) waits for the next
