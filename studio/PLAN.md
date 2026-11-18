@@ -7,7 +7,8 @@ the GUI, or create in the GUI and edit in code.
 "Studio" is a working title. At least five unrelated projects are already
 called "Manim Studio", so a real name is needed before any public release.
 
-Status: plan only. Nothing is built. Phase 0 starts on the user's go-ahead.
+Status: Phase 0 done (go). Phase 1 done: wireframes and code specification
+approved 2026-11-18. Phase 2 is next.
 
 ## 1. Decisions already made
 
@@ -189,6 +190,11 @@ control yet, and a tool that rewrites source files needs it).
 
 **Exit:** the user approves the wireframes and the code specification.
 
+**Status (2026-11-18): done; the user approved the wireframes and the code
+specification.** `docs/architecture.md`,
+`docs/protocol.md`, `docs/code_spec.md`, `docs/wireframes/index.html`,
+`docs/corpus.md` (+ `tests/corpus/awkward/`), `docs/testing.md`.
+
 ### Phase 2. The viewer that edits (L)
 
 Open any file. Timeline with clips linked to code. Scrub and play. Select
@@ -267,7 +273,7 @@ studio/
   tests/           round-trip suite and corpus
 ```
 
-Only `PLAN.md` exists now. The studio imports nothing from the video files and
+`PLAN.md`, `docs/`, `spikes/` and `tests/corpus/` exist now. The studio imports nothing from the video files and
 the video files import nothing from it. It reuses ideas from
 `tools/timeline_render.py` and `tools/check_layout.py`, not their code paths, so
 the preview and the check tools keep working unchanged.
@@ -278,7 +284,11 @@ the preview and the check tools keep working unchanged.
   `play()` per overlap group, delays via a 3-line `clip()` helper (S4).
 - ~~Should GUI-made scenes default to sequential code or to `at(t)` absolute
   time?~~ `at(t)` anchors in a `TimedScene`; sequential scenes stay editable (S4).
-- How should tier-2 overrides read in code so they stay obvious to a human?
-- What editable share is a realistic target for Phase 5 (after S5)?
-- How should the studio and the preview server avoid rendering the same file
-  at once (the Windows LaTeX lock problem)?
+- ~~How should tier-2 overrides read in code?~~ As ordinary statements right
+  after the code that made the object, no markers (code_spec.md §5).
+- ~~What editable share is a realistic target for Phase 5?~~ ≥ 95% of objects
+  drag-editable, ≥ 98% of clips retimable (corpus.md §4).
+- ~~How should the studio and the preview server avoid rendering the same
+  file at once?~~ The engine never renders video (dry_run, own Tex folder);
+  exports go through the preview server when it runs, else a lock file
+  (architecture.md §9).

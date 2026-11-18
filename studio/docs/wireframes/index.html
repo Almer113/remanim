@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio wireframes</title>
+<style>
+  :root {
+    --bg: #f4f4f2; --panel: #ffffff; --line: #c9c9c4; --ink: #222; --dim: #777;
+    --sel: #2f7de1; --warn: #c77700; --bad: #c0392b; --good: #2e8b57;
+    --frame: #1a1c20; --note: #fff7d6; --noteline: #e2c766;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; color: var(--ink);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); }
+  header { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: #fff; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0 16px 0 0; }
+  header button { border: 1px solid var(--line); background: #fff; padding: 5px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+  header button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .wrap { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; padding: 16px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 1100px) { .wrap { grid-template-columns: 1fr; } }
+  .app { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; overflow: hidden; min-width: 0; }
+  .bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 12px; flex-wrap: wrap; }
+  .bar .file { font-weight: 600; }
+  .pill { border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; color: var(--dim); white-space: nowrap; }
+  .pill.ok { color: var(--good); border-color: var(--good); }
+  .pill.err { color: var(--bad); border-color: var(--bad); }
+  .pill.warm { color: var(--warn); border-color: var(--warn); }
+  .grid { display: grid; grid-template-columns: 190px minmax(0, 1fr) 230px; grid-template-rows: auto auto; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .panel { border-right: 1px solid var(--line); padding: 8px; min-width: 0; }
+  .panel:last-child { border-right: 0; }
+  .panel h3 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); display: flex; justify-content: space-between; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 6px; }
+  .tabs span { padding: 2px 6px; border-radius: 4px; color: var(--dim); }
+  .tabs span.on { background: #eee; color: var(--ink); }
+  .tree div { padding: 2px 4px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 4px; align-items: center; }
+  .tree div.sel { background: #e3eefc; color: var(--sel); }
+  .tree div.dim { color: #aaa; }
+  .tree .ind1 { padding-left: 16px; } .tree .ind2 { padding-left: 28px; }
+  .badge { font-size: 10px; border: 1px solid var(--line); border-radius: 3px; padding: 0 3px; color: var(--dim); }
+  .canvasArea { padding: 10px; background: #e9e9e6; border-right: 1px solid var(--line); min-width: 0; position: relative; }
+  .canvasArea svg { width: 100%; height: auto; display: block; }
+  .canvasTools { display: flex; gap: 6px; margin-bottom: 6px; font-size: 12px; flex-wrap: wrap; }
+  .canvasTools span { border: 1px solid var(--line); background: #fff; border-radius: 4px; padding: 1px 6px; }
+  .canvasTools span.on { border-color: var(--sel); color: var(--sel); }
+  .insp .row { display: grid; grid-template-columns: 78px 1fr; gap: 6px; align-items: center; margin-bottom: 5px; }
+  .insp .row label { color: var(--dim); }
+  .field { border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; min-height: 22px; display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; }
+  .field.locked { background: #f3f3f3; color: #999; }
+  .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; flex: none; }
+  .code { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; background: #fafafa; border: 1px solid var(--line); border-radius: 4px; padding: 6px; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .code .hl { background: #e3eefc; display: block; margin: 0 -6px; padding: 0 6px; }
+  .code .add { background: #e4f5e9; display: block; margin: 0 -6px; padding: 0 6px; }
+  .code .del { background: #fbe4e1; display: block; margin: 0 -6px; padding: 0 6px; text-decoration: line-through; color: #a55; }
+  .code .err { background: #fbe4e1; display: block; margin: 0 -6px; padding: 0 6px; }
+  .code .ln { color: #aaa; display: inline-block; width: 26px; }
+  .timeline { grid-column: 1 / -1; border-top: 1px solid var(--line); padding: 8px 10px; overflow-x: auto; }
+  .tl { position: relative; min-width: 720px; }
+  .ruler { position: relative; height: 18px; margin-left: 110px; border-bottom: 1px solid var(--line); font-size: 10px; color: var(--dim); }
+  .ruler span { position: absolute; top: 2px; transform: translateX(-50%); }
+  .track { display: flex; height: 28px; border-bottom: 1px dashed #e2e2df; align-items: center; }
+  .track .name { width: 110px; flex: none; font-size: 11px; color: var(--dim); display: flex; gap: 4px; align-items: center; }
+  .track .lane { position: relative; flex: 1; height: 100%; }
+  .clip { position: absolute; top: 4px; height: 20px; border-radius: 4px; border: 1px solid #8aa9cf; background: #dbe7f6; font-size: 10.5px; padding: 2px 5px; white-space: nowrap; overflow: hidden; }
+  .clip.sel { border: 2px solid var(--sel); }
+  .clip.wait { background: repeating-linear-gradient(45deg, #f1f1ee, #f1f1ee 4px, #e6e6e2 4px, #e6e6e2 8px); border-color: #ccc; color: #888; }
+  .clip.voice { background: #efe4f7; border-color: #b99bd2; }
+  .clip.cap { background: #fff; border-color: #bbb; color: #555; }
+  .clip.lock { background: #eee; border-color: #bbb; color: #888; }
+  .clip .h { position: absolute; top: 0; bottom: 0; width: 5px; background: var(--sel); }
+  .anchor { position: absolute; top: 18px; bottom: 0; width: 0; border-left: 1px dashed #999; }
+  .anchor b { position: absolute; top: -16px; left: -3px; font-size: 9px; color: #666; font-weight: 500; white-space: nowrap; }
+  .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--bad); }
+  .wave { position: absolute; inset: 6px 0; background: repeating-linear-gradient(90deg, #c8b6d8 0 1px, transparent 1px 3px); opacity: .6; clip-path: polygon(0 50%, 5% 20%, 10% 70%, 15% 30%, 22% 60%, 30% 25%, 38% 75%, 46% 35%, 52% 55%, 54% 50%, 100% 50%, 54% 50%, 52% 45%, 46% 65%, 38% 25%, 30% 75%, 22% 40%, 15% 70%, 10% 30%, 5% 80%); }
+  .bottom { display: grid; grid-template-columns: minmax(0, 1fr) 330px; grid-column: 1 / -1; border-top: 1px solid var(--line); }
+  @media (max-width: 800px) { .bottom { grid-template-columns: 1fr; } }
+  .bottom > div { padding: 8px 10px; min-width: 0; }
+  .bottom > div:first-child { border-right: 1px solid var(--line); }
+  .lib { display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 6px; }
+  .lib div { border: 1px solid var(--line); border-radius: 6px; padding: 6px 4px; text-align: center; font-size: 11px; }
+  .lib div.drag { border-color: var(--sel); color: var(--sel); box-shadow: 0 2px 8px rgba(47, 125, 225, .25); }
+  .pop { position: absolute; background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, .18); padding: 10px; font-size: 12px; z-index: 5; }
+  .pop h4 { margin: 0 0 6px; font-size: 12px; }
+  .pop .btns { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
+  .pop .btns span { border: 1px solid var(--line); border-radius: 5px; padding: 3px 9px; }
+  .pop .btns span.pri { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px; background: #222; color: #fff; border-radius: 6px; padding: 6px 12px; font-size: 12px; white-space: nowrap; z-index: 5; }
+  .notes { background: var(--note); border: 1px solid var(--noteline); border-radius: 8px; padding: 12px 14px; align-self: start; position: sticky; top: 12px; }
+  .notes h2 { margin: 0 0 6px; font-size: 14px; }
+  .notes p { margin: 0 0 8px; line-height: 1.45; }
+  .notes ol { margin: 0; padding-left: 18px; line-height: 1.45; }
+  .notes li { margin-bottom: 6px; }
+  .num { display: inline-flex; width: 16px; height: 16px; border-radius: 50%; background: var(--warn); color: #fff; font-size: 10px; align-items: center; justify-content: center; font-weight: 700; flex: none; }
+  .callout { position: absolute; z-index: 6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Studio wireframes</h1>
+  <div id="nav"></div>
+</header>
+<div class="wrap">
+  <div class="app" id="app"></div>
+  <aside class="notes" id="notes"></aside>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// One shell, six screens. Each screen overrides parts of the shell.
+// Content is the real "Question" scene from order_matters.py.
+// ---------------------------------------------------------------------------
+const C = { bg: "#0f1115", fg: "#e8eaed", muted: "#8b929b", accent: "#58c4dd", blob: "#7fc7a8" };
+
+function canvasSVG(o = {}) {
+  const dx = o.blobDx || 0, dy = o.blobDy || 0;
+  const grey = o.grey ? ' opacity="0.35"' : "";
+  const sel = o.sel !== false ? `
+    <rect x="${78 + dx}" y="${208 + dy}" width="124" height="112" fill="none" stroke="#2f7de1" stroke-width="1.5"/>
+    ${[[78,208],[202,208],[78,320],[202,320]].map(([x,y]) => `<rect x="${x-4+dx}" y="${y-4+dy}" width="8" height="8" fill="#fff" stroke="#2f7de1"/>`).join("")}
+    <circle cx="${140 + dx}" cy="${196 + dy}" r="4" fill="#fff" stroke="#2f7de1"/>
+    <text x="${80 + dx}" y="${336 + dy}" fill="#2f7de1" font-size="11">blob · Blob</text>` : "";
+  const ghost = o.ghost ? `<g opacity="0.35"><ellipse cx="140" cy="270" rx="55" ry="48" fill="${C.blob}"/></g>` : "";
+  const guides = o.guides ? `<line x1="${140+dx}" y1="10" x2="${140+dx}" y2="350" stroke="#e0457b" stroke-dasharray="4 3"/><text x="${146+dx}" y="22" fill="#e0457b" font-size="10">grid_point(1, *)</text>` : "";
+  const drop = o.drop ? `<g><rect x="482" y="250" width="66" height="66" fill="none" stroke="${C.accent}" stroke-width="3"/><rect x="478" y="246" width="74" height="74" fill="none" stroke="#2f7de1" stroke-dasharray="4 3"/><text x="440" y="238" fill="#2f7de1" font-size="11">Square → drop at 0:03.4</text></g>` : "";
+  return `<svg viewBox="0 0 640 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Canvas">
+    <rect width="640" height="360" fill="${C.bg}"/>
+    <rect x="22.5" y="22.5" width="595" height="315" fill="none" stroke="#3a3f47" stroke-dasharray="3 4"/>
+    <g${grey}>
+      <text x="320" y="62" fill="${C.fg}" font-size="26" text-anchor="middle" font-family="sans-serif">Order matters</text>
+      ${ghost}
+      <g transform="translate(${dx} ${dy})">
+        <ellipse cx="140" cy="270" rx="55" ry="48" fill="${C.blob}"/>
+        <circle cx="122" cy="258" r="9" fill="#fff"/><circle cx="158" cy="258" r="9" fill="#fff"/>
+        <circle cx="124" cy="260" r="4" fill="#111"/><circle cx="160" cy="260" r="4" fill="#111"/>
+      </g>
+      <g transform="translate(${o.bubbleDx || 0} 0)">
+        <path d="M240 120 h300 a16 16 0 0 1 16 16 v60 a16 16 0 0 1 -16 16 h-230 l-40 30 l10 -30 h-40 a16 16 0 0 1 -16 -16 v-60 a16 16 0 0 1 16 -16z" fill="#fff"/>
+        <text x="390" y="160" fill="#111" font-size="14" text-anchor="middle" font-family="serif">R · S  =  S · R ?</text>
+        <text x="390" y="186" fill="#555" font-size="11" text-anchor="middle">(MathTex)</text>
+      </g>
+      <text x="320" y="340" fill="${C.fg}" font-size="13" text-anchor="middle">Rotate, then shear. Or shear, then rotate. Same result?</text>
+    </g>
+    ${guides}${sel}${drop}
+  </svg>`;
+}
+
+function fogSVG() {
+  return `<svg viewBox="0 0 640 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Canvas">
+    <defs><linearGradient id="fl" x1="0" x2="1"><stop offset="0" stop-color="${C.bg}"/><stop offset="1" stop-color="${C.bg}" stop-opacity="0"/></linearGradient>
+    <linearGradient id="fr" x1="1" x2="0"><stop offset="0" stop-color="${C.bg}"/><stop offset="1" stop-color="${C.bg}" stop-opacity="0"/></linearGradient></defs>
+    <rect width="640" height="360" fill="${C.bg}"/>
+    <path d="M0 140 C 120 160, 200 300, 330 290 S 520 150, 640 120" fill="none" stroke="${C.fg}" stroke-width="3"/>
+    <ellipse cx="300" cy="262" rx="22" ry="20" fill="${C.blob}"/>
+    <line x1="250" y1="250" x2="360" y2="292" stroke="${C.accent}" stroke-width="3"/>
+    <rect x="0" y="40" width="200" height="280" fill="url(#fl)"/><rect x="420" y="40" width="220" height="280" fill="url(#fr)"/>
+    <rect x="0" y="40" width="640" height="280" fill="none" stroke="#2f7de1" stroke-width="1.5"/>
+    <line x1="320" y1="12" x2="320" y2="350" stroke="#e0457b" stroke-dasharray="4 3"/>
+    <text x="326" y="26" fill="#e0457b" font-size="10">drag locked to y</text>
+    <text x="6" y="334" fill="#2f7de1" font-size="11">fog · VGroup</text>
+  </svg>`;
+}
+
+const RULER = [0,1,2,3,4,5,6,7].map(s => `<span style="left:${s / 7.5 * 100}%">0:0${s}</span>`).join("");
+const pct = t => (t / 7.5 * 100) + "%";
+function clip(t0, d, label, cls = "", extra = "") {
+  return `<div class="clip ${cls}" style="left:${pct(t0)};width:calc(${pct(d)} - 2px)">${extra}${label}</div>`;
+}
+function anchors(list) {
+  return list.map(t => `<div class="anchor" style="left:calc(110px + (100% - 110px) * ${t / 7.5})"><b>at(${t})</b></div>`).join("");
+}
+function timelineHTML(o = {}) {
+  const ph = o.playhead ?? 3.9;
+  const tracks = o.tracks || [
+    ["title", "", clip(0.2, 0.8, "FadeIn")],
+    ["blob", "", clip(0.2, 0.8, "FadeIn shift=UP") + clip(1.2, 1.0, "set_mode speaking", "sel")],
+    ["bubble · words", "", clip(1.2, 1.0, "FadeIn · Write")],
+    ["neq", "", clip(3.4, 1.2, "Transform") + clip(5.2, 1.0, "Indicate")],
+    ["narration", "", clip(0.2, 3.4, "“Rotate, then shear. Or shear, then rotate. Same result?”", "voice", '<div class="wave"></div>')],
+    ["captions", "", clip(0.2, 3.8, "Rotate, then shear. Or shear, then rotate…", "cap")],
+  ];
+  return `<div class="timeline"><div class="tl">
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-bottom:4px;gap:8px;flex-wrap:wrap">
+      <span>▶ 0:0${ph.toFixed(1)} / 0:07.5 · TARGET 7.5 s · 15 fps</span><span>${o.tlRight || "zoom ─●──── · snap to frames ✓ · ripple ☐"}</span></div>
+    <div class="ruler">${RULER}</div>
+    <div style="position:relative">
+      ${tracks.map(([n, b, c]) => `<div class="track"><div class="name">${n}${b ? ` <span class="badge">${b}</span>` : ""}</div><div class="lane">${c}</div></div>`).join("")}
+      ${anchors(o.anchors || [0.2, 1.2, 3.4, 5.2, 6.9])}
+      <div class="playhead" style="left:calc(110px + (100% - 110px) * ${ph / 7.5})"></div>
+      ${o.tlPop || ""}
+    </div>
+  </div></div>`;
+}
+
+const LAYERS_DEFAULT = `
+  <div>▾ Question</div>
+  <div class="ind1">title <span class="badge">Text</span></div>
+  <div class="ind1 sel">▸ blob <span class="badge">Blob</span></div>
+  <div class="ind1">▸ bubble <span class="badge">SpeechBubble</span></div>
+  <div class="ind2">words <span class="badge">MathTex</span></div>
+  <div class="ind1">neq <span class="badge">MathTex</span></div>
+  <div class="ind1 dim">caption <span class="badge">kit</span> <span class="badge">🔒</span></div>`;
+
+const INSP_DEFAULT = `
+  <div class="row"><label>Position</label><div class="field">x −4.40 &nbsp; y −1.30</div></div>
+  <div class="row"><label>Placed by</label><div class="field">to_corner(DL) .shift(UP*0.5)</div></div>
+  <div class="row"><label>height</label><div class="field">2.0</div></div>
+  <div class="row"><label>color</label><div class="field"><span class="swatch" style="background:${C.blob}"></span>BLOB_COLOR</div></div>
+  <div class="row"><label>mode</label><div class="field">plain ▾ <span style="color:var(--dim)">→ speaking @1.2</span></div></div>
+  <div class="row"><label>Easing</label><div class="field">smooth ▾</div></div>`;
+
+const CODE_DEFAULT = `<span class="ln">86</span>        title = get_title()
+<span class="hl"><span class="ln">87</span>        blob = Blob(BLOB_COLOR, height=2.0).to_corner(DL, buff=0.7).shift(UP * 0.5)</span><span class="ln">88</span>        bubble = SpeechBubble(...)`;
+
+function shell(s) {
+  return `
+  <div class="bar">
+    <span class="file">${s.file || "order_matters.py"}</span><span>›</span>
+    <span>${s.scene || "Question"} ▾</span>
+    <span class="pill">${s.sceneOf || "Scene 1 of 5"}</span>
+    <span style="flex:1"></span>
+    ${s.status || '<span class="pill ok">● engine ready · 12/12 cursors</span>'}
+    <span class="pill">rev 7</span>
+    <span class="pill">↶ undo · ↷ redo</span>
+    <span class="pill">Render ▾</span>
+  </div>
+  <div class="grid">
+    <div class="panel">
+      <div class="tabs"><span class="on">Layers</span><span>Library</span></div>
+      <div class="tree">${s.layers || LAYERS_DEFAULT}</div>
+    </div>
+    <div class="canvasArea">
+      <div class="canvasTools">${s.tools || '<span class="on">Select V</span><span>Move M</span><span>Scale S</span><span>Rotate R</span><span>Hand H</span><span>safe area ✓</span><span>regions ☐</span>'}</div>
+      ${s.canvas || canvasSVG()}
+      ${s.canvasOverlay || ""}
+    </div>
+    <div class="panel insp">
+      <h3><span>${s.inspTitle || "blob · Blob"}</span><span>${s.inspTier || "tier 1"}</span></h3>
+      ${s.insp || INSP_DEFAULT}
+    </div>
+    ${s.timeline || timelineHTML(s.tl)}
+    <div class="bottom">
+      <div><h3 style="margin:0 0 6px;font-size:11px;text-transform:uppercase;color:var(--dim);letter-spacing:.05em">Code peek · ${s.codeWhere || "line 87"} <span style="float:right;text-transform:none">open in editor ↗</span></h3>
+        <div class="code">${s.code || CODE_DEFAULT}</div></div>
+      <div><h3 style="margin:0 0 6px;font-size:11px;text-transform:uppercase;color:var(--dim);letter-spacing:.05em">Library</h3>
+        <div class="lib">${s.lib || ["Text", "MathTex", "Circle", "Square", "Arrow", "Axes", "Blob", "Bubble", "Grid", "FadeIn", "Write", "Create"].map(x => `<div>${x}</div>`).join("")}</div></div>
+    </div>
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------
+const SCREENS = [
+{
+  key: "overview", title: "1 · Overview",
+  notes: `<h2>Overview: open a file, select an object</h2>
+  <p>The real <code>Question</code> scene of order_matters.py. Everything on the canvas is a real Manim frame from the engine.</p>
+  <ol>
+  <li><b>Canvas</b> (Figma): click selects; alt-click walks up the group tree; handles for move, scale, rotate. Dashed box = safe area.</li>
+  <li><b>Layers</b>: the scene's object tree. Badges show class; 🔒 marks tier 3 (here the kit's caption, drawn by an updater).</li>
+  <li><b>Inspector</b>: properties from the constructor signature and later setters. "Placed by" names the call that positions the object now.</li>
+  <li><b>Timeline</b> (After Effects / CapCut): one row per object, clips = animations. Dashed lines are the scene's <code>at(t)</code> anchors. Narration with waveform and captions get their own rows.</li>
+  <li><b>Code peek</b>: the line behind the selection, highlighted. Selecting a clip shows its <code>play()</code>.</li>
+  <li><b>Status</b>: engine state, cursor warm-up, revision, undo.</li>
+  </ol>`,
+  s: {}
+},
+{
+  key: "drag", title: "2 · Drag → code",
+  notes: `<h2>Drag an object, see the code change</h2>
+  <ol>
+  <li>While dragging, the object's mask moves on top of the frame (instant, no engine). A guide snaps to <code>grid_point</code> columns and <code>style.py</code> regions.</li>
+  <li>On release the planner ranks edits and verifies the first by replay. The toast names the edit that was written.</li>
+  <li>The code peek shows the diff for a few seconds. Undo restores the exact bytes.</li>
+  <li>Dragging back by the same amount restores the original line: the added term disappears.</li>
+  </ol>
+  <p>Here: the literal <code>.shift(UP * 0.5)</code> is edited in place, the smallest possible change (S2: median 33 bytes).</p>`,
+  s: {
+    canvas: canvasSVG({ blobDx: 26, blobDy: 16, ghost: true, guides: true }),
+    canvasOverlay: `<div class="toast">✓ shift() numbers changed · line 87 · verified · ⌘Z to undo</div>`,
+    tools: '<span>Select V</span><span class="on">Move M</span><span>Scale S</span><span>Rotate R</span><span>Hand H</span><span>safe area ✓</span><span>regions ✓</span>',
+    insp: INSP_DEFAULT.replace("x −4.40 &nbsp; y −1.30", "x −4.00 &nbsp; y −1.55").replace(".shift(UP*0.5)", ".shift(UP*0.25 + 0.4*RIGHT)"),
+    code: `<span class="ln">86</span>        title = get_title()
+<span class="del"><span class="ln">87</span>        blob = Blob(BLOB_COLOR, height=2.0).to_corner(DL, buff=0.7).shift(UP * 0.5)</span><span class="add"><span class="ln">87</span>        blob = Blob(BLOB_COLOR, height=2.0).to_corner(DL, buff=0.7).shift(UP * 0.25 + 0.4 * RIGHT)</span><span class="ln">88</span>        bubble = SpeechBubble(...)`,
+    status: '<span class="pill ok">● verified in 0.3 s</span>',
+  }
+},
+{
+  key: "confirm", title: "3 · Side effects & refusals",
+  notes: `<h2>When an edit reaches further, ask first; when it can't work, say why</h2>
+  <ol>
+  <li><b>Confirm.</b> The only edit that verifies is inside a helper, so other uses move too. The dialog lists them, with the diff. "This one only" appears when a local edit exists (S2 gaps 2–3).</li>
+  <li><b>Refuse.</b> If no candidate moves the object exactly, nothing is written and the object snaps back. The reason names the line (here: an updater sets x every frame, so the drag is locked to y).</li>
+  <li><b>Tier badges</b> in the layers panel: <span class="badge">≈</span> tier 2 (edits go through literals or overrides), <span class="badge">🔒</span> tier 3 (code only).</li>
+  </ol>`,
+  s: {
+    layers: `<div>▾ FeelTheSlope</div><div class="ind1">ground <span class="badge">FunctionGraph</span> <span class="badge">≈</span></div>
+      <div class="ind1 sel">▸ fog <span class="badge">VGroup</span> <span class="badge">≈</span></div>
+      <div class="ind1">blob <span class="badge">Blob</span></div><div class="ind1">tangent <span class="badge">🔒</span></div><div class="ind1">x <span class="badge">ValueTracker</span></div>`,
+    inspTitle: "fog · VGroup", inspTier: "tier 2 ≈",
+    insp: `<div class="row"><label>Position</label><div class="field">x <span style="color:var(--bad)">🔒 updater</span> &nbsp; y −0.85</div></div>
+      <div class="row"><label>Made by</label><div class="field">get_fog() · line 209</div></div>
+      <div class="row"><label>window</label><div class="field">1.5</div></div><div class="row"><label>ramp</label><div class="field">1.2</div></div>
+      <div class="row"><label>Drag axis</label><div class="field">y only (x set at line 210)</div></div>`,
+    file: "gradient_descent.py", scene: "FeelTheSlope", sceneOf: "Scene 2 of 9",
+    canvas: fogSVG(),
+    canvasOverlay: `<div class="pop" style="left:6%;top:20%;width:min(380px,88%)"><h4>This edit also moves 1 other use</h4>
+      <div class="code"><span class="ln">137</span>            r.move_to(side * (window + (k + 0.5) * w)
+<span class="add"><span class="ln">137</span>                      + UP * (top + bottom) / 2 + 0.25 * DOWN)</span></div>
+      <p style="margin:6px 0 0">Inside <code>get_fog()</code>, so <b>Foggy</b> (line 182) moves too.</p>
+      <div class="btns"><span>Cancel</span><span>This one only</span><span class="pri">Move both</span></div></div>
+      <div class="toast" style="background:#7a2a20">✗ Not moved sideways: x is set every frame by the updater at line 210 · drag locked to y</div>`,
+    code: `<span class="hl"><span class="ln">209</span>        fog = get_fog()</span><span class="ln">210</span>        fog.add_updater(lambda m: m.move_to(RIGHT * x.get_value(), coor_mask=[1, 0, 0]))`,
+    codeWhere: "line 209",
+    tl: { tracks: [["ground", "≈", clip(0, 1.2, "Create")], ["fog", "≈", clip(0.4, 1.4, "FadeIn", "sel")], ["blob", "", clip(1, 0.8, "FadeIn")], ["tangent", "🔒", clip(2, 4, "always_redraw", "lock")], ["x", "", clip(2.4, 3, "x.animate.set_value(2.5)")]], anchors: [0.4, 2.4], playhead: 3.1 },
+  }
+},
+{
+  key: "timeline", title: "4 · Timeline edits",
+  notes: `<h2>Timeline: retime, overlap, ease</h2>
+  <ol>
+  <li><b>Trim</b> a clip by its edge → its <code>run_time=</code> changes.</li>
+  <li><b>Move</b> a group by dragging its anchor → the <code>self.at(t)</code> literal changes. Nothing else moves unless <b>ripple</b> is on.</li>
+  <li><b>Overlap</b>: drag a clip from one group into another → the two <code>play()</code>s merge, the later clip gets <code>clip(..., start=)</code> (S4).</li>
+  <li><b>Easing</b>: a popover with presets (<code>smooth</code>, <code>linear</code>, <code>there_and_back</code>…) and the curve; writes <code>rate_func=</code>.</li>
+  <li>Times shown are the <i>rendered</i> times, snapped to frames (S4 quirks).</li>
+  </ol>`,
+  s: {
+    tl: {
+      playhead: 3.6, anchors: [0.2, 1.2, 3.4, 6.9], tlRight: "zoom ──●─── · snap to frames ✓ · ripple ☑",
+      tracks: [
+        ["title", "", clip(0.2, 0.8, "FadeIn")],
+        ["blob", "", clip(0.2, 0.8, "FadeIn shift=UP") + clip(1.2, 1.0, "set_mode")],
+        ["bubble · words", "", clip(1.2, 1.0, "FadeIn · Write")],
+        ["neq", "", clip(3.4, 1.4, "Transform  run_time 1.2 → 1.4", "sel", '<span class="h" style="right:0"></span>')],
+        ["highlight", "", clip(3.9, 1.0, "Indicate  start=0.5", "", "")],
+        ["narration", "", clip(0.2, 3.4, "“Rotate, then shear…”", "voice", '<div class="wave"></div>')],
+      ],
+      tlPop: `<div class="pop" style="right:0;top:40px;width:200px"><h4>Easing · neq Transform</h4>
+        <svg viewBox="0 0 200 90" width="100%"><rect width="200" height="90" fill="#fafafa" stroke="#ddd"/><path d="M10 80 C 70 80, 130 10, 190 10" fill="none" stroke="#2f7de1" stroke-width="2"/></svg>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px"><span class="pill ok">smooth</span><span class="pill">linear</span><span class="pill">rush_into</span><span class="pill">there_and_back</span></div></div>`,
+    },
+    inspTitle: "Transform · clip", inspTier: "tier 1",
+    insp: `<div class="row"><label>Starts</label><div class="field">0:03.4 (at 3.4)</div></div>
+      <div class="row"><label>run_time</label><div class="field">1.4</div></div>
+      <div class="row"><label>rate_func</label><div class="field">smooth ▾</div></div>
+      <div class="row"><label>Group</label><div class="field">play() at line 106</div></div>`,
+    code: `<span class="ln">105</span>            self.at(3.4)
+<span class="del"><span class="ln">106</span>            self.play(Transform(words, neq), run_time=1.2)
+<span class="ln">107</span>            self.at(3.9)
+<span class="ln">108</span>            self.play(Indicate(neq), run_time=1.0)</span><span class="add"><span class="ln">106</span>            self.play(
+<span class="ln">107</span>                Transform(words, neq, run_time=1.4),
+<span class="ln">108</span>                clip(Indicate(neq), start=0.5, length=1.0),
+<span class="ln">109</span>            )</span>`,
+    codeWhere: "lines 105–109 (merge after overlap)",
+    canvas: canvasSVG({ sel: false }),
+  }
+},
+{
+  key: "library", title: "5 · Add from library",
+  notes: `<h2>Drag from the library onto the canvas</h2>
+  <ol>
+  <li>Pick a mobject (or a kit part: Blob, bubbles, ClippedGrid) and drop it on the canvas at the playhead time.</li>
+  <li>The studio inserts a creation statement and an entrance animation in tier-1 style (code_spec §4.5): named variable, palette colour, <code>run_time=</code>.</li>
+  <li>Dropping on a region guide writes <code>place(..., "right")</code> instead of coordinates.</li>
+  <li>Dropping an animation preset (FadeIn, Write…) onto a timeline row adds that clip for the row's object.</li>
+  </ol>`,
+  s: {
+    canvas: canvasSVG({ sel: false, drop: true }),
+    lib: ["Text", "MathTex", "Circle", "Square", "Arrow", "Axes", "Blob", "Bubble", "Grid", "FadeIn", "Write", "Create"].map(x => `<div class="${x === "Square" ? "drag" : ""}">${x}</div>`).join(""),
+    inspTitle: "square · Square (new)", inspTier: "tier 1",
+    insp: `<div class="row"><label>side_length</label><div class="field">1.5</div></div>
+      <div class="row"><label>color</label><div class="field"><span class="swatch" style="background:${C.accent}"></span>ACCENT</div></div>
+      <div class="row"><label>Entrance</label><div class="field">Create ▾ 0.8 s</div></div>`,
+    code: `<span class="ln">104</span>            self.play(FadeIn(bubble), Write(words), ..., run_time=1.0)
+<span class="add"><span class="ln">105</span>            square = Square(side_length=1.5, color=ACCENT).move_to(4.3 * RIGHT + 2.3 * DOWN)
+<span class="ln">106</span>            self.at(3.4)
+<span class="ln">107</span>            self.play(Create(square), run_time=0.8)</span>`,
+    codeWhere: "inserted after line 104",
+    tl: { playhead: 3.4 },
+  }
+},
+{
+  key: "error", title: "6 · Errors & external edits",
+  notes: `<h2>When the code breaks, or someone else edits it</h2>
+  <ol>
+  <li>A save (by hand or by Claude) that doesn't parse or crashes: the canvas keeps the last good frame, greyed. The error banner names the line; the code peek jumps there.</li>
+  <li>The timeline shows how far the trace got before the crash.</li>
+  <li>The studio doesn't write to a file it can't parse. Editing is disabled until the file is fixed, then everything reloads with the selection kept.</li>
+  <li>External edits that parse just reload: "rev 8 · changed outside the studio". Undo still works when the external change was elsewhere in the file.</li>
+  </ol>`,
+  s: {
+    status: '<span class="pill err">● crash in construct() · line 101</span>',
+    canvas: canvasSVG({ sel: false, grey: true }),
+    canvasOverlay: `<div class="pop" style="left:8%;top:36%;width:min(420px,84%);border-color:var(--bad)"><h4 style="color:var(--bad)">NameError: name 'wrods' is not defined</h4>
+      <div>order_matters.py, line 101, in Question.construct</div><div style="color:var(--dim);margin-top:4px">Showing the last good version (rev 7). Editing is paused until the file runs again.</div></div>`,
+    code: `<span class="ln">100</span>        with self.say("Rotate, then shear. Or shear, then rotate. Same result?"):
+<span class="err"><span class="ln">101</span>            self.at(1.2)  ...  Write(wrods)   ← NameError</span><span class="ln">102</span>            ...`,
+    codeWhere: "line 101 (error)",
+    tl: { tracks: [["title", "", clip(0.2, 0.8, "FadeIn")], ["blob", "", clip(0.2, 0.8, "FadeIn shift=UP")], ["(trace stopped)", "", `<div class="clip lock" style="left:${pct(1.2)};width:70%;border-style:dashed">trace stopped at 0:01.2 · line 101</div>`]], anchors: [0.2, 1.2], playhead: 1.2 },
+    insp: `<div style="color:var(--dim)">Editing paused: the file doesn't run.</div>`, inspTitle: "—", inspTier: "",
+  }
+},
+];
+
+const nav = document.getElementById("nav");
+function show(i) {
+  const sc = SCREENS[i];
+  document.getElementById("app").innerHTML = shell(sc.s);
+  document.getElementById("notes").innerHTML = sc.notes;
+  [...nav.children].forEach((b, j) => b.classList.toggle("on", i === j));
+  try { history.replaceState(null, "", "#" + sc.key); } catch (e) {}
+}
+SCREENS.forEach((sc, i) => { const b = document.createElement("button"); b.textContent = sc.title; b.onclick = () => show(i); nav.appendChild(b); });
+const start = Math.max(0, SCREENS.findIndex(s => "#" + s.key === location.hash));
+show(start);
+</script>
+</body>
+</html>
