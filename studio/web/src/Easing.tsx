@@ -101,10 +101,17 @@ export function EasingPicker({ value, fallback, disabled, onPick }: Props) {
       if (box.current?.contains(t) || grid.current?.contains(t)) return;
       setOpen(false);
     };
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    // Escape closes the grid only (the app's Escape would also clear the selection)
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopImmediatePropagation(); setOpen(false); } };
+    const close = () => setOpen(false);
     window.addEventListener("mousedown", away);
-    window.addEventListener("keydown", esc);
-    return () => { window.removeEventListener("mousedown", away); window.removeEventListener("keydown", esc); };
+    window.addEventListener("keydown", esc, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("mousedown", away);
+      window.removeEventListener("keydown", esc, true);
+      window.removeEventListener("resize", close);
+    };
   }, [open]);
   const names = Object.keys(CURVES);
   // the grid lives on <body> (the inspector is under the timeline's stacking)

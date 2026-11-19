@@ -66,13 +66,22 @@ def install(tracker):
     def add_sound(self, sound_file, time_offset=0, gain=None, **kwargs):
         if not _studio(self):
             return orig_sound(self, sound_file, time_offset, gain, **kwargs)
+        # found the way Manim finds it (assets dir, .wav/.mp3), and a missing
+        # file stops the scene here as it would stop a real render
+        from manim import config
+        from manim.utils.sounds import get_full_sound_file_path
+        path = get_full_sound_file_path(sound_file, Path(config.assets_dir))
         rec = _rec(self)
         if rec is not None:
             span, func, chain = _site()
-            rec["sounds"].append({"file": str(Path(sound_file).resolve()),
+            # only the narration's own sound belongs to its line (the first
+            # add_sound of say()/voiceover()); effects inside the block don't
+            line = rec.get("_pending")
+            rec["_pending"] = None
+            rec["sounds"].append({"file": str(Path(path).resolve()),
                                   "start": round(self.renderer.time + float(time_offset), 6),
                                   "gain": gain, "call": span, "func": func, "chain": chain,
-                                  "line": rec["_open"][-1] if rec["_open"] else None})
+                                  "line": line})
 
     def add_subcaption(self, content, duration=1, offset=0):
         if not _studio(self):
@@ -123,8 +132,10 @@ def install(tracker):
                      "call": span, "func": func, "chain": chain}
             rec["lines"].append(entry)
             rec["_open"].append(i)
+            rec["_pending"] = i
             try:
                 with orig_say(self, text, caption=caption) as d:
+                    rec["_pending"] = None
                     entry["duration"] = round(float(d), 6)
                     shown = caption or text
                     entry["hold"] = round(max(float(d), len(shown) / self.READ_CPS + self.READ_PAD), 6)
@@ -155,8 +166,10 @@ def install(tracker):
                      "start": round(self.renderer.time, 6), "call": span, "func": func, "chain": chain}
             rec["lines"].append(entry)
             rec["_open"].append(i)
+            rec["_pending"] = i
             try:
                 with orig_vo(self, text=text, ssml=ssml, **kwargs) as tr:
+                    rec["_pending"] = None
                     entry["start"] = round(float(getattr(tr, "start_t", entry["start"])), 6)
                     entry["duration"] = round(float(getattr(tr, "duration", 0.0)), 6)
                     entry["hold"] = entry["duration"]
@@ -183,7 +196,7 @@ def install(tracker):
 
 
 def new_record() -> dict:
-    return {"lines": [], "captions": [], "sounds": [], "sections": [], "_open": []}
+    return {"lines": [], "captions": [], "sounds": [], "sections": [], "_open": [], "_pending": None}
 
 
 def finish(rec: dict | None, cls) -> dict:

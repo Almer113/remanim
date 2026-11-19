@@ -529,12 +529,17 @@ class Engine:
         anims = []
         for i, a in enumerate(scene.animations):
             offset = 0.0
+            run = float(a.run_time)
             # clip(x, start=s): Succession(Wait(s), x) -- report x and its offset
             parts = getattr(a, "animations", None) if isinstance(a, Succession) else None
             if parts and len(parts) == 2 and isinstance(parts[0], Wait) and not isinstance(parts[1], Wait):
-                offset, a = float(a.animations[0].run_time), a.animations[1]
+                # a play(run_time=k) stretches the Succession: both parts scale with it
+                total = float(parts[0].run_time) + float(parts[1].run_time)
+                k = run / total if total > 0 else 1.0
+                offset, a = float(parts[0].run_time) * k, parts[1]
+                run = float(a.run_time) * k
             mob = None if isinstance(a, Wait) else getattr(a, "mobject", None)
-            anims.append({"index": i, "class": type(a).__name__, "run_time": round(float(a.run_time), 4),
+            anims.append({"index": i, "class": type(a).__name__, "run_time": round(run, 4),
                           "offset": round(offset, 4),
                           "rate_func": _rate_name(a.rate_func), "default_rate_func": _default_rate(type(a)),
                           "mobject": object_id(mob) if mob is not None else None,
@@ -644,7 +649,7 @@ class Engine:
         cls = getattr(self.module, scene_name)
         out = {"name": scene_name, "events": events, "duration": round(end, 6), "error": err,
                "audio": narration.finish(audio, cls),
-               "bases": bases, "target": getattr(getattr(self.module, scene_name), "TARGET", None) or None}
+               "bases": bases, "timed": any(c.__name__ == "TimedScene" for c in cls.__mro__), "target": getattr(getattr(self.module, scene_name), "TARGET", None) or None}
         return out if t is None else (out, cap)
 
     # -- frames ---------------------------------------------------------------

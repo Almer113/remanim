@@ -42,3 +42,26 @@ class KitTiming(TimedScene):
         self.play(FadeIn(dot), blink(blob), run_time=0.5)
         with self.say("Second line."):  # waits for the first line on the audio track only
             self.play(dot.animate.shift(UP), run_time=0.5)
+
+
+class GridFade(Scene):
+    """A ClippedGrid faded in and out while it turns and shears (it keeps
+    the same part count, so the fades don't crash)."""
+
+    def construct(self):
+        spin = ClippedGrid(("ellipse", ORIGIN, 3, 2), unit=0.35, bg_grid=False,
+                           matrix_of=lambda t: rotation(TAU * t) @ np.array([[1, 1], [0, 1]], dtype=float))
+        squash = ClippedGrid(("rect", RIGHT * 4, 3, 3), unit=0.4,
+                             matrix_of=lerp_matrix([[1, 0], [0, 0]]))
+        for g in (spin, squash):
+            seen = set()
+            for v in np.linspace(0, 1, 61):
+                g.tracker.set_value(v)
+                seen.add(len(g._draw().family_members_with_points()))
+            g.tracker.set_value(0)
+            assert len(seen) == 1, f"part count changes with the tracker: {sorted(seen)}"
+        spin.tracker.add_updater(lambda m, dt: m.increment_value(dt / 3))
+        self.add(spin.tracker)
+        self.play(FadeIn(spin.mobject), FadeIn(squash.mobject), run_time=1)
+        self.play(squash.tracker.animate.set_value(1), run_time=1)
+        self.play(FadeOut(spin.mobject), FadeOut(squash.mobject), run_time=1)

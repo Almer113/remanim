@@ -40,7 +40,8 @@ def _point_style(src: Source, kind: str) -> bool:
                 vals.append(n.args[0])
             if kind == "length" and isinstance(n, ast.keyword) and n.arg in ("run_time", "start", "length"):
                 vals.append(n.value)
-            if kind == "target" and isinstance(n, ast.Assign) and                     any(isinstance(t, ast.Name) and t.id == "TARGET" for t in n.targets):
+            if kind == "target" and isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None and                     any(isinstance(t, ast.Name) and t.id == "TARGET"
+                        for t in (n.targets if isinstance(n, ast.Assign) else [n.target])):
                 vals.append(n.value)
             for v in vals:
                 if isinstance(v, ast.Constant) and isinstance(v.value, (int, float)) and float(v.value).is_integer():
@@ -53,12 +54,19 @@ def _point_style(src: Source, kind: str) -> bool:
 
 
 def set_number(src: Source, node, value: float) -> Edit:
-    """A time literal. A whole value follows the file's habit for that kind
-    of number (`4.0` or `4`), so a move there and back restores the bytes in
-    either style; others keep the literal's own style."""
+    """A time literal. A whole literal keeps its own style (`5.0` stays
+    `6.0`); a fractional one that becomes whole follows the file's habit for
+    that kind of number (`4.0` or `4`), so a move there and back restores the
+    bytes either way."""
     if float(value).is_integer():
         v = fmt(value)
-        return Edit(*src.span(node), v + ".0" if _point_style(src, _kind_of(src, node)) else v)
+        old = src.text(node).lstrip("+-")
+        old_v = number_of(node)
+        if old_v is not None and float(old_v).is_integer():
+            dotted = "." in old
+        else:
+            dotted = _point_style(src, _kind_of(src, node))
+        return Edit(*src.span(node), v + ".0" if dotted else v)
     return _set_number_styled(src, node, value)
 
 
@@ -96,10 +104,6 @@ def _self_stmt(st, *methods) -> ast.Call | None:
     if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call) and _is_self(st.value, *methods):
         return st.value
     return None
-
-
-def _lead(src: Source, at: int) -> str:
-    return src.newline if at > 0 and src.data[at - 1:at] != b"\n" else ""
 
 
 def _alone(src: Source, st) -> bool:
@@ -146,7 +150,9 @@ def _plain_string(src: Source, node, what: str) -> str:
 def _clean_text(text, what: str) -> str:
     if not isinstance(text, str):
         raise EditError(f"the {what} must be text")
-    t = text.strip()
+    if "\x00" in text or any(0xD800 <= ord(ch) <= 0xDFFF for ch in text):
+        raise EditError(f"the {what} has characters that can't be written to the file")
+    t = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not t:
         raise EditError(f"the {what} is empty")
     if len(t) > 2000:
@@ -187,6 +193,14 @@ def plan_voice_caption(src: Source, scene: str, line: dict, caption) -> Plan:
     spoken = spoken_node.value if isinstance(spoken_node, ast.Constant) and isinstance(spoken_node.value, str) else None
     cap = None if caption in (None, "") else _clean_text(caption, "caption")
     existing = Source.keyword(call, kw)
+    if existing is None and kw == "caption" and len(call.args) > 1:
+        # say("words", "caption"): the caption is the second argument
+        pos = call.args[1]
+        if cap is None or cap == spoken:
+            raise EditError(f"the caption is the second argument at line {call.lineno}; remove it in the code")
+        _plain_string(src, pos, "caption")
+        return Plan([Edit(*src.span(pos), _string_like(src, pos, cap))], f"line {call.lineno}: caption set",
+                    checks={"voice": "caption", "index": line["index"], "caption": cap})
     if cap is None or cap == spoken:
         if existing is None:
             raise EditError("the caption already shows the spoken text")
@@ -360,13 +374,20 @@ def knock_on(before: dict, after: dict, fps: float, skip=frozenset()) -> str:
     """What else moved: '; 3 later clips start 0.8 s later'. Shown with the
     edit's summary, so a move that pushes other clips never does it silently."""
     tol = FRAME_TOL / fps
+    lines = ""
+    v0 = [ln.get("start") for ln in ((before.get("audio") or {}).get("lines") or []) if ln.get("start") is not None]
+    v1 = [ln.get("start") for ln in ((after.get("audio") or {}).get("lines") or []) if ln.get("start") is not None]
+    if len(v0) == len(v1):
+        nv = sum(1 for x, y in zip(v0, v1) if abs(y - x) > tol)
+        if nv:
+            lines = f"; {nv} narration line{'s' if nv > 1 else ''} moved"
     a = [e for e in before["events"] if e["kind"] == "play"]
     b = [e for e in after["events"] if e["kind"] == "play"]
     if len(a) != len(b):
         return ""
     moved = [y["start"] - x["start"] for i, (x, y) in enumerate(zip(a, b))
              if i not in skip and abs(y["start"] - x["start"]) > tol]
-    out = ""
+    out = lines
     if moved:
         lo, hi = min(moved), max(moved)
         amount = f"{abs(lo):.2f} s" if abs(hi - lo) <= tol else f"{min(abs(lo), abs(hi)):.2f}–{max(abs(lo), abs(hi)):.2f} s"
@@ -498,14 +519,25 @@ def _play_args(src: Source, call: ast.Call, n_anims: int) -> list:
     return list(call.args)
 
 
+def _refuse_computed(cc):
+    raise EditError(f"the clip() at line {cc.lineno} has a computed length; change it in the code")
+
+
 def _runtime_edits(src: Source, expr, value: float) -> list:
     """Edits that give one play() argument its own run_time (used when a
     play()'s run_time= is spread onto its animations)."""
     from .planner import _anim_call, _animate_attr, _animate_call
     v = fmt(value)
-    inner, _, ln, cc = clip_parts(expr)
+    inner, sn, ln, cc = clip_parts(expr)
     if cc is not None:
-        return [] if ln is not None else [set_keyword(src, cc, "length", v)]
+        # under play(run_time=R) Manim stretches the whole clip() to R, start
+        # included: there is no faithful length= to write for it
+        if sn is not None and not (number_of(sn) == 0.0):
+            raise EditError(f"the clip() at line {cc.lineno} is stretched by the play()'s run_time; "
+                            "give it its own length in the code first")
+        if ln is not None:
+            return [] if number_of(ln) is not None and abs(number_of(ln) - value) < 1e-9                 else [set_number(src, ln, value)] if number_of(ln) is not None else _refuse_computed(cc)
+        return [set_keyword(src, cc, "length", v)]
     c = _anim_call(expr)
     if c is not None:
         k = Source.keyword(c, "run_time")
@@ -517,7 +549,11 @@ def _runtime_edits(src: Source, expr, value: float) -> list:
     ac = _animate_call(expr)
     if ac is not None:
         k = Source.keyword(ac, "run_time")
-        return [] if k is not None else [set_keyword(src, ac, "run_time", v)]
+        if k is None:
+            return [set_keyword(src, ac, "run_time", v)]
+        if number_of(k.value) is not None and abs(number_of(k.value) - value) > 1e-9:
+            return [set_number(src, k.value, value)]
+        return []
     b = _animate_attr(expr)
     if b is not None:
         _, end = src.span(b)
@@ -557,6 +593,12 @@ def plan_anim_offset(src: Source, clip: dict, anim: int, start: float, fps: floa
         raise EditError(f"the clip's start is computed ({src.text(s_node)}); change it in the code")
     if abs((old or 0.0) - start) < 0.5 / fps:
         raise EditError("the clip already starts there")
+    for k in call.keywords:
+        if k.arg not in ("run_time", None):
+            # play(rate_func=...) is set on the clip()'s Succession too, and
+            # warps its wait: the start would not be where you put it
+            raise EditError(f"the play() at line {call.lineno} sets {k.arg}= for all its animations; "
+                            "give each animation its own in the code first")
     edits = []
     play_rt = Source.keyword(call, "run_time")
     rt = None
@@ -681,8 +723,10 @@ def plan_shift(src: Source, scene: str, events: list, lines: list, plays: list, 
         wait = _self_stmt(prev, "wait") if prev is not None else None
         if at is not None and at.args and number_of(at.args[0]) is not None:
             old = number_of(at.args[0])
-            new = round(old + dt, 2)
             before = _ends_before(src, blk, i - 1, spans, block_start)
+            # an at() already in the past waits for nothing: the group really
+            # starts when the code before it ends, so move from there
+            new = round(max(old, before) + dt, 2)
             if new < before - frame / 2:
                 raise EditError(f"{what} can't start before {before:.2f} s: the code before it runs until then")
             if new <= before + frame / 2 and _alone(src, prev) and remove_statement(src, prev) is not None:
@@ -720,9 +764,19 @@ def plan_shift(src: Source, scene: str, events: list, lines: list, plays: list, 
         notes.append(f"{stmt} added before line {st.lineno}")
     if timed and ripple:
         last = max(items, key=lambda c: (c[0].end_lineno, c[0].end_col_offset))[0]
+        moved = {id(it[0]) for it in items}
+
+        def in_moved(st):   # inside a moved `with self.say(...):` block
+            q = src.parent(st)
+            while q is not None and q is not fn:
+                if id(q) in moved:
+                    return True
+                q = src.parent(q)
+            return False
         n = 0
         for st in _all_stmts(fn.body):
-            if (st.lineno, st.col_offset) <= (last.end_lineno, last.end_col_offset) or id(st) in edited:
+            after = (st.lineno, st.col_offset) > (last.end_lineno, last.end_col_offset)
+            if not (after or in_moved(st)) or id(st) in edited:
                 continue
             c = _self_stmt(st, "at")
             if c is not None and c.args and number_of(c.args[0]) is not None:
@@ -817,10 +871,11 @@ def plan_merge(src: Source, scene: str, moving: dict, anim, into: dict, start: f
     if start < -1e-9:
         raise EditError("a clip can't start before its group; move the group earlier first")
     args2 = _play_args(src, p2, len(moving["anims"]))
-    for k in p2.keywords:
-        if k.arg != "run_time":
-            raise EditError(f"the play() at line {p2.lineno} sets {k.arg}= for all its animations; "
-                            "it can't be split up from the timeline")
+    for p_, verb in ((p2, "it can't be split up from the timeline"),
+                     (p1, "the clip would take that on")):
+        for k in p_.keywords:
+            if k.arg != "run_time":
+                raise EditError(f"the play() at line {p_.lineno} sets {k.arg}= for all its animations; {verb}")
     rt2 = Source.keyword(p2, "run_time")
     if rt2 is not None and number_of(rt2.value) is None:
         raise EditError(f"the play() at line {p2.lineno} has a computed run_time")
@@ -925,7 +980,19 @@ def _names(node) -> tuple[set, set]:
     for n in ast.walk(node):
         if isinstance(n, ast.Name):
             (out_w if isinstance(n.ctx, (ast.Store, ast.Del)) else out_r).add(n.id)
+        elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "self":
+            # scene state: self.grid = ... then self.play(self.grid...) depend
+            (out_w if isinstance(n.ctx, (ast.Store, ast.Del)) else out_r).add("self." + n.attr)
     return out_w, out_r
+
+
+# self.X reads that are the scene's own methods, not state
+_SCENE_METHODS = {"self." + m for m in ("play", "wait", "add", "remove", "at", "say", "line", "voiceover",
+                                        "bring_to_front", "bring_to_back", "add_sound", "next_section",
+                                        "add_subcaption", "wait_until_bookmark", "camera", "renderer",
+                                        "mobjects", "time", "add_fixed_in_frame_mobjects", "fade_all",
+                                        "set_camera_orientation", "move_camera", "begin_ambient_camera_rotation",
+                                        "stop_ambient_camera_rotation")}
 
 
 def _file_names(src: Source) -> set:
@@ -987,7 +1054,8 @@ def plan_reorder(src: Source, scene: str, events: list, play: int, target: int, 
             if x is m:
                 continue
             xw, xr = _names(x)
-            shared = ((mw & (xr | xw)) | (xw & mr) | (mr & xr)) & own
+            shared = {n for n in (mw & (xr | xw)) | (xw & mr) | (mr & xr)
+                      if n in own or (n.startswith("self.") and n not in _SCENE_METHODS)}
             if shared:
                 raise EditError(f"line {m.lineno} and line {x.lineno} both use {', '.join(sorted(shared))}; "
                                 "reordering them would change what the scene does")

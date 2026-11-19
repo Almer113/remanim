@@ -107,7 +107,7 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
         {c.kind === "play" && (
           <div className="row">
             <label>Easing</label>
-            <EasingPicker value={rate} fallback={a ? a.default_rate_func : c.anims[0]?.default_rate_func ?? null}
+            <EasingPicker key={`${c.index}:${sel.anim}`} value={rate} fallback={a ? a.default_rate_func : c.anims[0]?.default_rate_func ?? null}
               disabled={!!locked || busy} onPick={(name) => edit("rate_func", name)} />
           </div>
         )}

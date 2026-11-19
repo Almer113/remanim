@@ -80,7 +80,8 @@ pane, not VS Code.
     then `bring_to_front()` the contents).
   - `ClippedGrid`: linear-transformation grid clipped to a box or ellipse,
     driven by `.tracker`. `.snapshot()` gives a static copy of the end state.
-    Fade it in or out only while the tracker is still.
+    It keeps the same number of parts at every tracker value (invisible
+    stand-ins for clipped lines), so it can be faded while it moves.
   - Helpers: `chain_matrices(step, ...)` (a step is a matrix, or `turn(θ)`
     for a real rotation), `lerp_matrix`, `rotation`, `bmatrix`,
     `video_icon`, `clip_rect`, `clip_ellipse`, and `clip(anim, start=,
@@ -229,7 +230,9 @@ Full write-up: `docs/recreation_learnings.md`.
   `set_opacity(1)` paints them solid.
 - Don't `FadeIn`/`FadeOut` an `always_redraw` mobject whose number of parts
   changes while it animates (crash: zip length mismatch). Fade while still,
-  then animate.
+  then animate, or keep the part count fixed with invisible stand-ins, as
+  `ClippedGrid` does. Whether it crashes depends on frame timing, so one
+  clean render proves nothing.
 - A `run_time=` on `play()` overrides every animation in it. Without one,
   each keeps its own (`FadeIn(a, run_time=1)`, `b.animate(run_time=2)...`)
   and the play lasts as long as the longest. Delay one with

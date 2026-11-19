@@ -80,6 +80,7 @@ export interface SoundWave {
   start: number;
   duration: number;
   peaks: number[];
+  line?: number | null;  // the narration line this sound is, if any
 }
 
 export interface Model {

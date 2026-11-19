@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import re
 import json
+import threading
 import warnings
 from pathlib import Path
 
@@ -180,14 +182,35 @@ def _doc(req) -> Document:
     return doc
 
 
+def _int(q, key: str, default: int | None = None) -> int:
+    """A whole-number query parameter; a missing or malformed one is the
+    client's mistake (400), not a server error."""
+    v = q.get(key)
+    if v is None and default is not None:
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text=f"{key} must be a whole number")
+
+
+def _still(doc: Document, rev: int):
+    """The code changed (an edit, undo or save) before or while this was
+    rendered: the answer belongs to no revision, and must not be cached
+    under this one's URL."""
+    if rev != doc.rev:
+        raise web.HTTPGone(text="old revision")
+
+
 async def frame(req: web.Request):
     doc = _doc(req)
     q = req.query
-    rev = int(q.get("rev", doc.rev))
+    rev = _int(q, "rev", doc.rev)
     if rev != doc.rev:
         raise web.HTTPGone(text="old revision")
     size, fmt = q.get("size", "full"), q.get("fmt", "png")
-    r = await doc.frame(q["scene"], int(q["f"]), size, fmt, ids=q.get("ids") == "1")
+    r = await doc.frame(q["scene"], _int(q, "f"), size, fmt, ids=q.get("ids") == "1")
+    _still(doc, rev)
     if "error" in r:
         return web.json_response(r["error"], status=500)
     return web.Response(body=r["image"], content_type="image/jpeg" if fmt == "jpeg" else "image/png",
@@ -197,18 +220,22 @@ async def frame(req: web.Request):
 async def objects(req: web.Request):
     doc = _doc(req)
     q = req.query
-    if int(q.get("rev", doc.rev)) != doc.rev:
-        raise web.HTTPGone(text="old revision")
-    r = await doc.frame(q["scene"], int(q["f"]), "full", "png", ids=True)
+    rev = _int(q, "rev", doc.rev)
+    _still(doc, rev)
+    r = await doc.frame(q["scene"], _int(q, "f"), "full", "png", ids=True)
+    _still(doc, rev)
     if "error" in r:
         return web.json_response({"error": r["error"]}, status=500)
-    return web.json_response({"objects": r.get("objects", []), "rev": doc.rev, "f": int(q["f"])})
+    return web.json_response({"objects": r.get("objects", []), "rev": doc.rev, "f": _int(q, "f")})
 
 
 async def idmap(req: web.Request):
     doc = _doc(req)
     q = req.query
-    r = await doc.frame(q["scene"], int(q["f"]), "full", "png", ids=True)
+    rev = _int(q, "rev", doc.rev)
+    _still(doc, rev)
+    r = await doc.frame(q["scene"], _int(q, "f"), "full", "png", ids=True)
+    _still(doc, rev)
     if "error" in r:
         return web.json_response(r["error"], status=500)
     return web.Response(body=r["idmap"], content_type="image/png",
@@ -216,37 +243,64 @@ async def idmap(req: web.Request):
 
 
 _sound: dict = {}  # (file, rev, scene) -> (wav bytes, waveforms); last few only
+_sound_lock = threading.Lock()   # /audio and /audio/peaks arrive together: mix once
 
 
-def _scene_sound(doc: Document, scene: str):
+def _scene_sound(doc: Document, scene: str, rev: int):
     from . import audio
-    key = (doc.name, doc.rev, scene)
-    if key not in _sound:
+    key = (doc.name, rev, scene)
+    with _sound_lock:
+        if key in _sound:
+            return _sound[key]
         tr = doc.traces.get(scene)
-        if tr is None:
-            raise web.HTTPNotFound(text="scene not traced")
-        _sound[key] = (audio.wav_bytes(audio.mix(tr)), audio.waveforms(tr))
+        if tr is None or doc.rev != rev:
+            raise web.HTTPNotFound(text="scene not traced at this revision")
+        problems: list = []
+        _sound[key] = (audio.wav_bytes(audio.mix(tr, problems)), audio.waveforms(tr))
+        for msg in problems:
+            print(f"[audio] {doc.name} {scene}: {msg}", flush=True)
         while len(_sound) > 8:
             _sound.pop(next(iter(_sound)))
-    return _sound[key]
+        return _sound[key]
 
 
 async def sound(req: web.Request):
     doc = _doc(req)
     q = req.query
-    if int(q.get("rev", doc.rev)) != doc.rev:
+    rev = _int(q, "rev", doc.rev)
+    if rev != doc.rev:
         raise web.HTTPGone(text="old revision")
-    wav, _ = await asyncio.to_thread(_scene_sound, doc, q["scene"])
-    return web.Response(body=wav, content_type="audio/wav",
-                        headers={"Cache-Control": "max-age=3600, immutable"})
+    wav, _ = await asyncio.to_thread(_scene_sound, doc, q["scene"], rev)
+    return _ranged(req, wav, "audio/wav", {"Cache-Control": "max-age=3600, immutable"})
+
+
+def _ranged(req: web.Request, body: bytes, ctype: str, headers: dict) -> web.Response:
+    """Answer `Range: bytes=a-b` with a 206, so the browser can seek the
+    sound (without it, Chrome plays a WAV from 0 whatever currentTime says)."""
+    headers = {**headers, "Accept-Ranges": "bytes"}
+    rng = req.headers.get("Range", "")
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip())
+    if not m or (not m.group(1) and not m.group(2)):
+        return web.Response(body=body, content_type=ctype, headers=headers)
+    n = len(body)
+    if m.group(1):
+        a = int(m.group(1))
+        b = min(int(m.group(2)), n - 1) if m.group(2) else n - 1
+    else:  # the last k bytes
+        a, b = max(0, n - int(m.group(2))), n - 1
+    if a >= n or a > b:
+        return web.Response(status=416, headers={**headers, "Content-Range": f"bytes */{n}"})
+    return web.Response(status=206, body=body[a:b + 1], content_type=ctype,
+                        headers={**headers, "Content-Range": f"bytes {a}-{b}/{n}"})
 
 
 async def sound_peaks(req: web.Request):
     doc = _doc(req)
     q = req.query
-    if int(q.get("rev", doc.rev)) != doc.rev:
+    rev = _int(q, "rev", doc.rev)
+    if rev != doc.rev:
         raise web.HTTPGone(text="old revision")
-    _, waves = await asyncio.to_thread(_scene_sound, doc, q["scene"])
+    _, waves = await asyncio.to_thread(_scene_sound, doc, q["scene"], rev)
     return web.json_response({"rev": doc.rev, "scene": q["scene"], "sounds": waves})
 
 

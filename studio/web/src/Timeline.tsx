@@ -25,7 +25,7 @@ const LABEL = 150;
 const SNAP_PX = 7;
 
 type Drag =
-  | { kind: "trim"; clip: number; anim: number | null; x0: number; base: number; d: number }
+  | { kind: "trim"; clip: number; anim: number | null; x0: number; base: number; d: number; moved: boolean }
   | { kind: "play"; clip: number; x0: number; dt: number; over: number | null; after: boolean; reorder: boolean; moved: boolean }
   | { kind: "anim"; clip: number; anim: number; x0: number; dt: number; split: boolean; moved: boolean }
   | { kind: "line"; line: number; x0: number; dt: number; moved: boolean }
@@ -36,7 +36,11 @@ type Pop = { kind: "line"; line: number } | { kind: "newline"; t: number } | { k
 
 function markersKey(file: string, scene: string) { return `studio.markers.${file}.${scene}`; }
 function loadMarkers(file: string, scene: string): { t: number; name: string }[] {
-  try { return JSON.parse(localStorage.getItem(markersKey(file, scene)) ?? "[]"); } catch { return []; }
+  try {
+    const v = JSON.parse(localStorage.getItem(markersKey(file, scene)) ?? "[]");
+    return Array.isArray(v) ? v.filter((m) => m && typeof m.t === "number" && Number.isFinite(m.t))
+      .map((m) => ({ t: m.t, name: typeof m.name === "string" ? m.name : "M" })) : [];
+  } catch { return []; }
 }
 function saveMarkers(file: string, scene: string, m: { t: number; name: string }[]) {
   try { localStorage.setItem(markersKey(file, scene), JSON.stringify(m)); } catch { /* private window */ }
@@ -74,14 +78,15 @@ export function Timeline(p: Props) {
   useEffect(() => {
     if (!voice.length && !(scene.sounds ?? []).length) { setWaves([]); return; }
     let gone = false;
-    fetch(`/audio/peaks?file=${encodeURIComponent(p.file)}&scene=${encodeURIComponent(scene.name)}&rev=${p.rev}`)
+    fetch(`/audio/peaks?file=${encodeURIComponent(p.file)}&scene=${encodeURIComponent(scene.name)}&rev=${p.rev}&s=${encodeURIComponent(p.session ?? "")}`)
       .then((r) => (r.ok ? r.json() : { sounds: [] })).then((j) => { if (!gone) setWaves(j.sounds ?? []); })
       .catch(() => {});
     return () => { gone = true; };
   }, [p.file, scene.name, p.rev]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // a new model ends any gesture planned against the old one
-  useEffect(() => { setDrag(null); setPicked({ plays: [], lines: [] }); }, [scene]);
+  // a new revision or scene ends any gesture planned against the old one (a
+  // second model for the same revision, after background tracing, doesn't)
+  useEffect(() => { setDrag(null); setPicked({ plays: [], lines: [] }); }, [p.rev, p.session, scene.name]);
 
   const pps = Math.max(1e-3, ((width - LABEL - 12) / dur) * zoom);
   const x = (t: number) => LABEL + t * pps;
@@ -90,7 +95,10 @@ export function Timeline(p: Props) {
   const snapPoints = useMemo(() => {
     const s: number[] = [0, dur];
     for (const c of scene.clips) { s.push(c.start, c.start + c.duration); }
-    for (const v of voice) s.push(v.start, v.start + v.duration);
+    for (const v of voice) {
+      s.push(v.start, v.start + v.duration);
+      for (const b of v.bookmarks ?? []) s.push(b.t);
+    }
     for (const m of markers) s.push(m.t);
     for (const sec of scene.sections ?? []) s.push(sec.start);
     return s;
@@ -105,12 +113,21 @@ export function Timeline(p: Props) {
     }
     return Math.round(best * 100) / 100;
   };
+  // a move by `raw` from t0: on a snap point, land on it; on the plain grid,
+  // round the move itself (t0 sits on a frame, e.g. 6.667 at 15 fps, so
+  // rounding the landing time would write at(6.98) instead of at(7.0))
+  const snapDelta = (t0: number, raw: number, free: boolean, skip: number[] = []) => {
+    if (free) return Math.round(raw * 100) / 100;
+    const want = t0 + raw;
+    const end = snapT(want, false, skip);
+    return Math.abs(end - Math.round(want * 20) / 20) < 1e-6 ? Math.round(raw * 20) / 20 : end - t0;
+  };
 
   // -- gestures ---------------------------------------------------------------------
   const dragRef = useRef(drag);
   dragRef.current = drag;
-  const live = useRef({ pps, p, ripple, picked, scene, snapT });
-  live.current = { pps, p, ripple, picked, scene, snapT };
+  const live = useRef({ pps, p, ripple, picked, scene, snapT, snapDelta });
+  live.current = { pps, p, ripple, picked, scene, snapT, snapDelta };
   const dragging = !!drag;
   useEffect(() => {
     if (!dragging) return;
@@ -122,12 +139,19 @@ export function Timeline(p: Props) {
       const raw = (e.clientX - (d.kind === "box" ? 0 : d.x0)) / L.pps;
       const free = e.ctrlKey || e.metaKey;
       if (d.kind === "trim") {
-        setDrag({ ...d, d: Math.max(0.05, Math.round((d.base + raw) * 20) / 20) });
+        const c = L.scene.clips[d.clip];
+        const s0 = c.start + (d.anim !== null ? c.anims[d.anim].offset ?? 0 : 0);
+        // the code holds a length, and starts sit on frames (6.667 at 15 fps):
+        // on the plain grid, round the length, not the end, so the file gets
+        // run_time=1.1 rather than 1.0333; on a snap point, meet that point
+        const len = d.base + L.snapDelta(s0 + d.base, raw, free, [s0 + d.base]);
+        setDrag({ ...d, d: Math.max(0.05, Math.round(len * 10000) / 10000),
+                  moved: d.moved || Math.abs(e.clientX - d.x0) > 3 });
       } else if (d.kind === "box") {
         setDrag({ ...d, x1: e.clientX });
       } else if (d.kind === "play") {
         const c = L.scene.clips[d.clip];
-        const dt = L.snapT(c.start + raw, free, [c.start]) - c.start;
+        const dt = L.snapDelta(c.start, raw, free, [c.start]);
         let over: number | null = null, after = false;
         if (e.altKey) {
           const t = c.start + raw;
@@ -138,11 +162,11 @@ export function Timeline(p: Props) {
       } else if (d.kind === "anim") {
         const c = L.scene.clips[d.clip];
         const a0 = c.start + (c.anims[d.anim].offset ?? 0);
-        const dt = L.snapT(a0 + raw, free, [a0]) - a0;
+        const dt = L.snapDelta(a0, raw, free, [a0]);
         setDrag({ ...d, dt, split: e.altKey, moved: d.moved || Math.abs(e.clientX - d.x0) > 3 });
       } else if (d.kind === "line") {
         const v = (L.scene.voice ?? [])[d.line];
-        const dt = L.snapT(v.start + raw, free, [v.start]) - v.start;
+        const dt = L.snapDelta(v.start, raw, free, [v.start]);
         setDrag({ ...d, dt, moved: d.moved || Math.abs(e.clientX - d.x0) > 3 });
       }
     };
@@ -153,7 +177,9 @@ export function Timeline(p: Props) {
       const L = live.current;
       const sc = L.scene;
       if (d.kind === "trim") {
-        if (Math.abs(d.d - d.base) > 1e-6) L.p.onTrim(d.clip, d.anim, Number(d.d.toFixed(4)));
+        if (!d.moved || Math.abs(d.d - d.base) < 1e-6) return;
+        if (!L.p.editable) { L.p.onBlocked("Pause and wait for the current edit first"); return; }
+        L.p.onTrim(d.clip, d.anim, Number(d.d.toFixed(4)));
         return;
       }
       if (d.kind === "box") {
@@ -215,25 +241,29 @@ export function Timeline(p: Props) {
   }, [dragging]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // R toggles ripple, M drops a marker at the playhead (when no field has focus)
+  const addMarkerRef = useRef<() => void>(() => {});
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
       const tag = (document.activeElement?.tagName ?? "").toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select") return;
+      if (document.querySelector(".modal-back")) return;   // a dialog is open
       if (e.key === "r" || e.key === "R") setRipple((v) => !v);
-      else if (e.key === "m" || e.key === "M") addMarker();
+      else if (e.key === "m" || e.key === "M") addMarkerRef.current();
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  });
+  }, []);
 
   const addMarker = () => {
     const t = Math.round((f / fps) * 100) / 100;
     if (markers.some((m) => Math.abs(m.t - t) < 1e-6)) return;
-    const next = [...markers, { t, name: `M${markers.length + 1}` }].sort((a, b) => a.t - b.t);
+    const n = Math.max(0, ...markers.map((m) => Number(/^M(\d+)$/.exec(m.name)?.[1] ?? 0))) + 1;
+    const next = [...markers, { t, name: `M${n}` }].sort((a, b) => a.t - b.t);
     setMarkers(next);
     saveMarkers(p.file, scene.name, next);
   };
+  addMarkerRef.current = addMarker;
   const dropMarker = (t: number) => {
     const next = markers.filter((m) => m.t !== t);
     setMarkers(next);
@@ -271,10 +301,12 @@ export function Timeline(p: Props) {
   const trimHandle = (clip: number, anim: number | null, base: number, locked: boolean) =>
     locked ? null : (
       <span className="trim" title="Drag to change the length"
-        onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); setDrag({ kind: "trim", clip, anim, x0: e.clientX, base, d: base }); }} />
+        onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); setDrag({ kind: "trim", clip, anim, x0: e.clientX, base, d: base, moved: false }); }} />
     );
 
   const shiftOf = (c: Clip) => {
+    if (drag?.kind === "line" && drag.moved && picked.lines.includes(drag.line) && picked.plays.includes(c.play_index!))
+      return drag.dt;
     if (!drag || drag.kind !== "play" || !drag.moved) return 0;
     if (!drag.reorder) {
       const ps = picked.plays.includes(scene.clips[drag.clip].play_index!) ? picked.plays : [scene.clips[drag.clip].play_index];
@@ -291,8 +323,8 @@ export function Timeline(p: Props) {
 
   const inner = LABEL + dur * pps + 20;
   const t0 = f / fps;
-  const wavesFor = (v: VoiceLine) => waves.find((w) => Math.abs(w.start - v.start) < 0.02);
-  const otherWaves = waves.filter((w) => !voice.some((v) => Math.abs(w.start - v.start) < 0.02));
+  const wavesFor = (v: VoiceLine) => waves.find((w) => w.line === v.index);
+  const otherWaves = waves.filter((w) => w.line === null || w.line === undefined);
   const canNarrate = !!scene.timed;
   const box = drag?.kind === "box" ? drag : null;
 
@@ -300,7 +332,7 @@ export function Timeline(p: Props) {
     <div className="timeline">
       <div className="tl-tools">
         <label className="chk" title="R: moving a group also moves every later at() and TARGET">
-          <input type="checkbox" checked={ripple} onChange={(e) => setRipple(e.target.checked)} /> ripple
+          <input type="checkbox" checked={ripple} onChange={(e) => { setRipple(e.target.checked); e.target.blur(); }} /> ripple
         </label>
         <button disabled={!editable || !canNarrate} title={canNarrate ? "Add a narration line at the playhead" : "Narration lines need a TimedScene"}
           onClick={() => setPop({ kind: "newline", t: Math.round(t0 * 100) / 100 })}>＋ line</button>
@@ -312,10 +344,16 @@ export function Timeline(p: Props) {
         )}
         <span className="grow" />
         <span className="muted hint">drag = move · edge = trim · Alt-drag = swap / split · Shift-drag = select · Ctrl = no snap</span>
-        <label className="muted">zoom <input type="range" min={1} max={8} step={0.25} value={zoom} onChange={(e) => setZoom(Number(e.target.value))} /></label>
+        <label className="muted">zoom <input type="range" min={1} max={8} step={0.25} value={zoom} onChange={(e) => setZoom(Number(e.target.value))}
+          onPointerUp={(e) => e.currentTarget.blur()} /></label>
       </div>
       {pop && <PopEditor pop={pop} scene={scene} editable={editable} onClose={() => setPop(null)}
-        onEdit={(m) => { const r = p.onEdit(m); if (r) r.then((x) => { if (x?.type === "edit.done") setPop(null); }); }} />}
+        onEdit={(m) => {
+          if (!editable) { p.onBlocked("Pause and wait for the current edit first"); return; }
+          const r = p.onEdit(m);
+          if (r) r.then((x) => { if (x?.type === "edit.done") setPop(null); });
+          else p.onBlocked("Another edit is still running");
+        }} />}
       <div className="tl-scroll" ref={lane}>
         <div style={{ width: Math.max(inner, width - 2), position: "relative" }}>
           <div className="ruler" onMouseDown={scrubFrom}>

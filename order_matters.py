@@ -227,8 +227,8 @@ class Takeaway(Beat):
         self.at(0.2)
         self.add(cloud)
         self.play(FadeIn(blob), Create(cloud), run_time=0.8)
-        # Fade in while still; only then start turning. FadeIn on a grid that is
-        # changing shape (lines clipping in and out) crashes on mismatched parts.
+        # Fade in while still; only then start turning (a grid that turns while
+        # it fades in is hard to read).
         self.play(FadeIn(spin.mobject), run_time=0.4)
         spin.tracker.add_updater(lambda m, dt: m.increment_value(dt / 5))
         self.add(spin.tracker)

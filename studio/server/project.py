@@ -11,6 +11,7 @@ import ast
 import asyncio
 import hashlib
 import math
+import re
 import secrets
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -90,6 +91,17 @@ def _stop_reason(err: dict) -> str:
                 "FadeIn/FadeOut of an always_redraw object (a ClippedGrid) that is still moving; "
                 "the edit only changed the timing it happens at. Fade it while it is still")
     return why
+
+
+_BOOKMARK = re.compile(r"<bookmark\s+mark\s*=\s*['\"][^'\"]*['\"]\s*/>")
+
+
+def _tts_failed(err: dict) -> bool:
+    """Text-to-speech, not the scene, failed (offline, service down)."""
+    m = err.get("message", "")
+    tb = err.get("traceback") or ""
+    return "Edge TTS failed" in m or "edge_tts_service" in tb or "edge_tts" in tb
+
 
 class Document:
     def __init__(self, path: Path, api: list[str], notify):
@@ -330,7 +342,7 @@ class Document:
                     rows[key]["clips"].append({"clip": i, "anim": a["index"]})
         for key, row in rows.items():
             row["label"] = self._label(row["chain"]) or self._object_label(row["id"], row["class"])
-        timed = "TimedScene" in (tr.get("bases") or [])
+        timed = tr.get("timed", "TimedScene" in (tr.get("bases") or []))
         return {"name": tr["name"], "duration": tr["duration"], "error": tr.get("error"),
                 "bases": tr.get("bases", []), "target": tr.get("target"), "clips": clips,
                 "rows": list(rows.values()), "frames": self.frame_count(tr["name"]), "timed": timed,
@@ -348,14 +360,17 @@ class Document:
                     call, _ = timeline._line_call(self.src, tr["name"], ln)
                 except EditError as e:
                     lock = str(e)
-            shown = ln.get("caption") or ln["text"]
+            shown = _BOOKMARK.sub("", ln.get("caption") or ln["text"]).strip()
+            # a voiceover's caption is up exactly as long as its speech, so only
+            # its length can be a problem; say() holds captions itself
+            hold = ln.get("hold") if ln["kind"] == "say" else None
             voice.append({"index": ln["index"], "kind": ln["kind"], "text": ln["text"], "caption": ln.get("caption"),
                           "start": ln["start"], "requested": ln["requested"], "duration": ln.get("duration", 0.0),
                           "hold": ln.get("hold", 0.0), "block_end": ln.get("block_end"),
                           "bookmarks": ln.get("bookmarks") or [],
                           "line": call.lineno if call is not None else (ln["call"][0] if ln.get("call") else None),
                           "lock": lock, "movable": lock is None and timed and ln["kind"] == "say",
-                          "warnings": timeline.caption_warnings(shown, ln.get("hold"))})
+                          "warnings": timeline.caption_warnings(shown, hold)})
         line_files = {ln.get("audio") for ln in a.get("lines", [])}
         sounds = []
         for snd in a.get("sounds", []):
@@ -621,7 +636,7 @@ class Document:
         except (TypeError, ValueError):
             return {"type": "edit.refused", "reason": "no frame given"}
         t = round(f / fps, 4)
-        timed = "TimedScene" in (tr.get("bases") or [])
+        timed = tr.get("timed", "TimedScene" in (tr.get("bases") or []))
         events = tr["events"]
         src = self.src
         fv = f  # the frame verification looks at
@@ -696,7 +711,7 @@ class Document:
     # -- timeline edits: narration, moving groups and clips (Phase 4) ----------------------
     async def _timeline(self, scene: str, tr: dict, msg: dict) -> dict:
         fps = self.meta.get("fps", 15)
-        timed = "TimedScene" in (tr.get("bases") or [])
+        timed = tr.get("timed", "TimedScene" in (tr.get("bases") or []))
         events = tr["events"]
         lines = (tr.get("audio") or {}).get("lines", [])
         src = self.src
@@ -798,13 +813,17 @@ class Document:
         after = r["trace"]
         if after.get("error"):
             m = after["error"]["message"]
-            if "speech" in m.lower() or "edge" in m.lower() or "synthes" in m.lower():
+            if _tts_failed(after["error"]):
                 return {"type": "edit.refused", "reason": f"text-to-speech failed (no network?): {m}"}
             return {"type": "edit.refused", "reason": _stop_reason(after["error"])}
         why = timeline.check(plan.checks, tr, after, fps)
         if why:
             return {"type": "edit.refused", "reason": why}
-        note = plan.note + timeline.knock_on(tr, after, fps, set(plan.checks.get("starts", {}).get("plays", {})))
+        # a reorder, merge or split changes which play is which: index-by-index
+        # "what else moved" would be noise there
+        same_plays = not ({"order", "merged", "split"} & set(plan.checks))
+        note = plan.note + (timeline.knock_on(tr, after, fps, set(plan.checks.get("starts", {}).get("plays", {})))
+                            if same_plays else "")
         return await self._write_verified(new, note)
 
     def _animating(self, tr: dict, obj: dict, f: int) -> str | None:

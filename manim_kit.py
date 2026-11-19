@@ -404,9 +404,9 @@ class ClippedGrid:
     chain_matrices). Add `grid.mobject` to the scene and animate with
     `grid.tracker.animate.set_value(1)`.
 
-    Notes: don't FadeIn/FadeOut `grid.mobject` while the tracker is moving:
-    the line count changes as lines clip in and out, and the fade crashes
-    (zip length mismatch). Fade it while still, then animate. Shears and
+    Notes: the grid always has the same number of parts (lines clipped out
+    of the frame and squashed arrows become invisible stand-ins), so it can
+    be faded in or out while the tracker moves. Shears and
     stretches pull the grid's edge into view, so use
     extent ≈ 20 for those. Linear interpolation towards a matrix with
     negative determinant passes through det = 0 (the grid flattens).
@@ -458,6 +458,10 @@ class ClippedGrid:
             for p, q in (((k, -E), (k, E)), ((-E, k), (E, k))):
                 seg = self._clip(self.to_screen(M, p), self.to_screen(M, q))
                 if seg is None:
+                    # outside the frame: an invisible stand-in keeps the part
+                    # count the same at every tracker value (fades can't crash)
+                    g.add(Line(self.center, self.center + RIGHT * 1e-3, stroke_width=width,
+                               color=color, stroke_opacity=0))
                     continue
                 axis = k == 0 and axes_color is not None
                 g.add(Line(*seg, stroke_width=width * (1.5 if axis else 1),
@@ -481,6 +485,11 @@ class ClippedGrid:
             if np.linalg.norm(end - self.center) > 1e-3:
                 out.add(Arrow(self.center, end, buff=0, color=col, stroke_width=4,
                               max_tip_length_to_length_ratio=0.25, tip_length=0.18))
+            else:
+                # squashed to nothing: an invisible arrow keeps the part count
+                out.add(Arrow(self.center, self.center + RIGHT * 0.01, buff=0, color=col,
+                              stroke_width=4, max_tip_length_to_length_ratio=0.25,
+                              tip_length=0.18).set_opacity(0))
         if self.border and self.frame[0] == "rect":
             _, c, w, h = self.frame
             out.add(Rectangle(width=w, height=h, color=WHITE, stroke_width=2).move_to(c))

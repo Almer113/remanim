@@ -178,22 +178,46 @@ export function App() {
   // -- playback ----------------------------------------------------------------------
   const playRef = useRef<{ t0: number; f0: number } | null>(null);
   const hasSound = !!scene && !scene.pending && ((scene.voice ?? []).length > 0 || (scene.sounds ?? []).length > 0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => {
     if (!playing) return;
     playRef.current = { t0: performance.now(), f0: f >= nFrames - 1 ? 0 : f };
     setRest(false);
     // the scene's narration and sounds, mixed by the server (GET /audio); the
-    // audio clock drives the frames while it plays, so picture and words stay together
+    // audio clock drives the frames while it plays, so picture and words stay
+    // together. Until the sound really starts (the mix is made and loaded),
+    // the picture holds at the start frame instead of running ahead.
     let audio: HTMLAudioElement | null = null;
-    if (hasSound && !muted && model && scene) {
-      audio = new Audio(`/audio?file=${encodeURIComponent(model.file)}&scene=${encodeURIComponent(scene.name)}&rev=${model.rev}`);
+    let waiting = false;
+    if (hasSound && model && scene) {
+      audio = new Audio(`/audio?file=${encodeURIComponent(model.file)}&scene=${encodeURIComponent(scene.name)}`
+        + `&rev=${model.rev}&s=${encodeURIComponent(session)}`);
+      audio.muted = muted;
       audio.currentTime = playRef.current.f0 / fps;
-      audio.play().catch(() => {});
+      waiting = true;
+      const go = () => {
+        if (!waiting) return;
+        waiting = false;
+        const want = playRef.current!.f0 / fps;
+        if (audio && Math.abs(audio.currentTime - want) > 0.25) {
+          // the sound couldn't seek there: keep the picture on the wall clock
+          // and silence the sound rather than play the wrong words
+          audio.pause();
+          audio = null;
+        }
+        playRef.current = { t0: performance.now(), f0: playRef.current!.f0 };
+      };
+      const fail = () => { waiting = false; audio = null; playRef.current = { t0: performance.now(), f0: playRef.current!.f0 }; };
+      audio.addEventListener("playing", go, { once: true });
+      audio.addEventListener("error", fail, { once: true });
+      audio.play().catch(fail);
+      audioRef.current = audio;
     }
     let raf = 0;
     const tick = () => {
       const p = playRef.current!;
-      const viaAudio = audio && !audio.paused && audio.currentTime > 0;
+      if (waiting) { raf = requestAnimationFrame(tick); return; }
+      const viaAudio = audio && !audio.paused && !audio.ended;
       const nf = viaAudio ? Math.floor(audio!.currentTime * fps)
         : p.f0 + Math.floor(((performance.now() - p.t0) / 1000) * fps);
       if (nf >= nFrames - 1) {
@@ -206,8 +230,24 @@ export function App() {
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    return () => { cancelAnimationFrame(raf); audio?.pause(); };
+    return () => {
+      cancelAnimationFrame(raf);
+      waiting = false;
+      if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
+      audioRef.current = null;
+    };
   }, [playing]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // a different scene, file or revision stops playback (and its sound)
+  useEffect(() => {
+    setPlaying(false);
+    setRest(true);
+  }, [file, scene?.name, model?.rev, session]);
+
+  // mute and unmute while playing
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.muted = muted;
+  }, [muted]);
 
   const seek = useCallback((nf: number, atRest: boolean) => {
     setPlaying(false);
@@ -416,9 +456,11 @@ export function App() {
           };
           return (
             <span className="scene-order" title="Render order (the file's SCENES list)">
-              <button disabled={!canEdit || i <= 0} onClick={() => moveScene(-1)}>◀</button>
+              <button disabled={!canEdit || i <= 0} onClick={() => moveScene(-1)}
+                title="Render this scene earlier" aria-label="Render this scene earlier">◀</button>
               <span className="muted">{i + 1}/{names.length}</span>
-              <button disabled={!canEdit || i >= names.length - 1} onClick={() => moveScene(1)}>▶</button>
+              <button disabled={!canEdit || i >= names.length - 1} onClick={() => moveScene(1)}
+                title="Render this scene later" aria-label="Render this scene later">▶</button>
             </span>
           );
         })()}
@@ -482,7 +524,7 @@ export function App() {
               <button onClick={togglePlay} disabled={!ready} title="Play / pause (Space)">{playing ? "⏸" : "▶"}</button>
               <span className="mono">{time} / {scene && !scene.pending ? scene.duration.toFixed(2) : "…"} s · frame {f}</span>
               {scene?.target ? <span className="muted">TARGET {scene.target} s</span> : null}
-              {hasSound && <button className="ghost" onClick={() => { const m = !muted; setMuted(m); localStorageSet("studio.muted", m ? "1" : "0"); }}
+              {hasSound && <button className="ghost" aria-pressed={muted} aria-label={muted ? "Sound off" : "Sound on"} onClick={() => { const m = !muted; setMuted(m); localStorageSet("studio.muted", m ? "1" : "0"); }}
                 title={muted ? "Sound off: narration is not played" : "Sound on: narration plays with the picture"}>{muted ? "🔇" : "🔊"}</button>}
               <span className="muted">{fps} fps</span>
             </div>

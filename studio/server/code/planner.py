@@ -418,4 +418,6 @@ def _string_like(src, node, s: str) -> str:
         body = body.replace(q[0], "\\" + q[0])  # inside triple quotes too
         if len(q) == 1:
             body = body.replace("\n", "\\n").replace("\r", "\\r")
+    if len(q) == 3 and getattr(src, "newline", "\n") != "\n":
+        body = body.replace("\n", src.newline)  # keep the file's line endings
     return f"{prefix}{q}{body}{q}"
