@@ -138,11 +138,106 @@ Same envelope and replies as Phase 3. Times are seconds in the scene;
   duration, hold, line, lock, movable, warnings, bookmarks), `captions`,
   `burned_captions`, `sounds` and `sections`; anims carry `offset`.
 
+## Added in Phase 5
+
+```jsonc
+// change one value in tier-1/2 code, in place (the code peek); span as model.literals gave it
+{"type": "edit.literal", "span": [42, 31, 42, 35], "value": {"number": 1.6}}   // or {"string": "..."} / {"name": "RED"}
+```
+
+- The file model gains `literals`: every number, string and CONSTANT name
+  in tier-1/2 statements and in module/class constants, as `{span, line,
+  cols: [start, end] in characters, kind: number|string|name, text, value
+  (strings, unquoted), scope: method|helper|constant}`. Not listed: values
+  inside f-strings, tier-3 code, docstrings, `DEGREES`/`PI`/`TAU`.
+- `edit.literal` asks first (`edit.preview`) for a value inside a helper
+  (every use changes) or a module/class constant (names the lines that
+  read it). The replay checks only that the scene still runs.
+- `edit.literal` also takes `{"changes": [{span, value}, ...]}`: several
+  values in one edit and one undo step (the in-place text editor sends
+  every changed argument of a `MathTex` this way). Unchanged parts are
+  skipped; overlapping spans are refused.
+- Object records of `Text`, `MarkupText`, `MathTex`, `Tex`, `Paragraph`,
+  `Title`, `BulletedList` gain `texts`: one `{span, value, editable, raw,
+  code}` per positional argument. `editable` is true for a plain string
+  literal in tier-1/2 code; a computed argument has `span: null` and its
+  source in `code`. Double-clicking such an object on the canvas opens the
+  in-place editor. A TeX error on replay refuses the edit with LaTeX's own
+  message (`LaTeX can't compile the new text: Undefined control sequence,
+  after "a^2 + \badcommand"`).
+- Part colour (step 6):
+  ```jsonc
+  // colour some glyphs of a Text / MathTex / Tex; glyph indices from GET /glyphs
+  {"type": "edit.part_colour", "object": {...}, "f": 30, "glyphs": [3, 4], "value": {"name": "YELLOW"}}
+  ```
+  The selection grows to whole pieces (`\vec{v}`, a Text word's letters
+  stay per letter). Candidates, best first: `t2c={"word": C}` (Text; a
+  slice key `"[a:b]"` when the word repeats); `tex_to_color_map={"x": C}`
+  (a piece whose TeX occurs once, when no code indexes the formula or
+  hands it to `TransformMatching*`); `eq[i].set_color(C)` /
+  `eq[i][a:b].set_color(C)` on a new line after the formula is named. Each
+  is replayed; the first where exactly the picked glyphs take the colour
+  and no other glyph changes is written.
+- After `edit.shift`, `edit.voice` and `edit.offset`, any `self.at(t)` that
+  waited before the edit and now waits for nothing is removed in the same
+  edit; the summary says so.
+- Object records gain `updaters` (count) and `updater_at` (`[file name,
+  line]` of the first updater written in the project). A drag that every
+  candidate misses names what puts the object back: an updater, an
+  animation that carries it, or a later `.animate`.
+- Graphs (step 7): an `Axes`/`NumberPlane` record gains `coords: {o, ex,
+  ey}` (scene position of (0, 0), and of one unit along each axis);
+  a `NumberLine` gains `{o, ex}`. A point placed with `axes.c2p(1, 2)`,
+  `coords_to_point(...)` or `n2p(3)` is dragged in axis units: the numbers
+  in the call change (`axes.c2p(1.5, 1)`). A drag off a number line falls
+  back to a shift. Objects also gain `curve` (`{params, expr, span}` of the
+  plotted lambda; `edit.curve` with `expr`) and `ranges` (Axes ranges and
+  lengths as `edit.literal` fields).
+- Transforms (step 8):
+  ```jsonc
+  {"type": "edit.transform_kind", "clip": 3, "arg": 0, "kind": "ReplacementTransform"}
+  // TransformMatchingTex: pair a source part with a target part it didn't match (writes key_map=)
+  {"type": "edit.match_parts", "clip": 3, "arg": 0, "source_key": "x", "target_key": "z"}
+  ```
+  `/objects` inside a play() gains `ghosts`: per play() argument that has a
+  target, `{index, kind, target: box}`; for `TransformMatchingTex/Shapes`
+  also `pairs: [{key, source, target, mapped?, to?}]`, `unmatched_source`,
+  `unmatched_target` (`[{key, box}]`) and `keys` (true for Tex: keys are
+  TeX text). Boxes are `[x0, y0, x1, y1]` in scene units, worked out as the
+  play starts. Clips gain `transforms` (`{kind, source, target, kinds}` per
+  argument). The canvas draws these while that clip is selected.
+- Camera (steps 9, 10):
+  ```jsonc
+  {"type": "edit.camera", "f": 30, "center": [1, 0.5], "width": 8}   // 2D (MovingCameraScene)
+  {"type": "edit.camera", "f": 0, "phi": 60, "theta": -45, "zoom": 1.2}  // 3D, degrees
+  ```
+  `/objects` gains `camera`: `{kind: "2d", center, width, height}` or
+  `{kind: "3d", phi, theta, gamma, zoom, focal_distance, center}`. 2D at
+  frame 0 places the camera (`self.camera.frame.move_to(..)`, or edits that
+  line); later it edits the last finished `self.camera.frame.animate` play
+  or inserts one. 3D edits `move_camera` under the playhead or the last
+  `set_camera_orientation`. Scenes gain `ambient`: each
+  `begin_ambient_camera_rotation` rate as an `edit.literal` field.
+- 3D objects (step 11) gain `proj: {ex, ey, ez}`: the on-screen vector
+  (frame units) of one world unit along x, y and z at the object. The
+  canvas solves a drag onto the world's x-y plane and sends an ordinary
+  `edit.move` in world units. Objects pinned with
+  `add_fixed_in_frame_mobjects` have no `proj` and move in screen space.
+- Composite presets (step 12): `{"type": "edit.composite", "preset":
+  "graph" | "number_line" | "vector" | "equation" | "title_card" | "brace" |
+  "highlight" | "surface", "x", "y", "f", "object"?}`. `surface` needs a
+  ThreeDScene and tilts the camera when the scene sets none.
+
 HTTP:
 - `GET /audio?file=&scene=&rev=` → the scene's narration and sounds mixed
   into one mono 24 kHz WAV, as long as the scene. Cached per revision.
 - `GET /audio/peaks?file=&scene=&rev=` → `[{start, duration, file, peaks}]`,
   50 peak values per second for each sound.
+- `GET /glyphs?file=&scene=&rev=&f=&id=` → `{glyphs: {kind: tex|text,
+  parts, map: [[part, start, end]] per glyph, boxes: [[x0, y0, x1, y1]] in
+  scene units, colors}}`, or `{glyphs: null}` when the probe compile
+  doesn't draw exactly what the object draws. A formula's first request
+  costs a LaTeX compile (~2 s); later ones are cached.
 
 ## HTTP
 

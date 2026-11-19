@@ -110,7 +110,7 @@ class Worker:
         fps = self.engine.fps
         t = max(0, int(msg["f"])) / fps + 1e-4  # a negative frame would never be reached
         c = self.engine.frame(msg["scene"], t, msg.get("ids", False))
-        out = {"image": _encode(c.frame, msg.get("size", "full"), msg.get("fmt", "png"))}
+        out = {"image": _encode(c.frame, msg.get("size", "full"), msg.get("fmt", "png")), "camera": c.camera}
         if c.idmap is not None:
             out["idmap"] = _encode_ids(c.idmap)
             boxes = _boxes(c.idmap, len(c.objects))
@@ -118,6 +118,8 @@ class Worker:
                 o["box"] = b
             _group_boxes(c.objects)
             out["objects"] = c.objects
+            if c.ghosts:
+                out["ghosts"] = c.ghosts
         return out
 
     def op_verify(self, msg):
@@ -132,12 +134,15 @@ class Worker:
             if msg.get("object") or msg.get("objects"):
                 # one run: the whole trace, and the objects at f on the way
                 t = max(0, int(msg["f"])) / eng.fps + 1e-4
-                tr, c = eng.trace(msg["scene"], t, True)
+                # with glyphs: that object's glyph map too (part colour checks)
+                want = msg.get("object") if msg.get("glyphs") and msg.get("object") else True
+                tr, c = eng.trace(msg["scene"], t, want)
                 out = {"trace": tr}
                 if tr["error"] is None and c is not None:
                     # (no boxes here: only centres and sites are compared)
                     out["object"] = next((o for o in c.objects if o["id"] == msg.get("object")), None)
                     out["objects"] = c.objects
+                    out["camera"] = c.camera
             else:
                 out = {"trace": eng.trace(msg["scene"])}
             if msg.get("eval_name"):

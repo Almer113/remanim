@@ -104,7 +104,72 @@ def plan_timing(src: Source, clip: dict, field_: str, value) -> Plan:
         plan = _rate_func(src, clip, _name_or_refuse(value, "rate function"))
     if plan is None:
         raise EditError(f"{field_} can't be edited on a {clip['kind']} clip yet")
+    if plan.checks.get("one_pass"):
+        return plan  # changes this pass of the loop only
     return _confirm_loop(src, _call(src, clip["call"], name or "play"), plan)
+
+
+def loop_element(src: Source, call, name: ast.Name, k):
+    """`for t, s in zip((5.5, 7.8), topics): self.at(t)`: on pass k, `t` is the
+    k-th number of the literal it comes from. That number, and the loop; or
+    None when it isn't a literal or the pass can't be told (a loop inside a loop)."""
+    if not isinstance(k, int) or k < 0:
+        return None
+    n = src.parent(call)
+    loop = None
+    while n is not None and not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(n, (ast.For, ast.AsyncFor)) and loop is None and _binds(n.target, name.id):
+            loop = n
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.While, ast.comprehension)) and loop is not None:
+            return None  # an outer loop runs this loop several times
+        n = src.parent(n)
+    if loop is None:
+        return None
+    # the name must not be assigned again inside the loop
+    for x in ast.walk(loop):
+        if x is not loop.target and isinstance(x, ast.Name) and x.id == name.id and isinstance(x.ctx, ast.Store)                 and not _inside(x, loop.target):
+            return None
+    it, tgt = loop.iter, loop.target
+    seq, pos = None, None
+    if isinstance(it, (ast.List, ast.Tuple)):
+        seq = it.elts
+        pos = None if isinstance(tgt, ast.Name) else _position(tgt, name.id)
+        if pos is None and not isinstance(tgt, ast.Name):
+            return None
+    elif isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and isinstance(tgt, ast.Tuple):
+        p = _position(tgt, name.id)
+        if p is None:
+            return None
+        if it.func.id == "zip" and p < len(it.args) and isinstance(it.args[p], (ast.List, ast.Tuple)):
+            seq = it.args[p].elts
+        elif it.func.id == "enumerate" and p == 1 and it.args and isinstance(it.args[0], (ast.List, ast.Tuple)):
+            seq = it.args[0].elts
+    if seq is None or k >= len(seq) or any(isinstance(e, ast.Starred) for e in seq):
+        return None
+    el = seq[k]
+    if pos is not None:
+        if not isinstance(el, (ast.Tuple, ast.List)) or pos >= len(el.elts):
+            return None
+        el = el.elts[pos]
+    return (el, loop) if number_of(el) is not None else None
+
+
+def _binds(target, name: str) -> bool:
+    return any(isinstance(x, ast.Name) and x.id == name for x in ast.walk(target))
+
+
+def _inside(node, root) -> bool:
+    return any(x is node for x in ast.walk(root))
+
+
+def _position(tgt, name: str):
+    """Index of `name` in a flat tuple target `(t, s)`; None if nested or absent."""
+    if not isinstance(tgt, (ast.Tuple, ast.List)):
+        return None
+    for i, e in enumerate(tgt.elts):
+        if isinstance(e, ast.Name) and e.id == name:
+            return i
+    return None
 
 
 def _wait_duration(src, clip, name, value) -> Plan:
@@ -113,7 +178,35 @@ def _wait_duration(src, clip, name, value) -> Plan:
         if not call.args:
             raise EditError("at() without a time")
         new_t = round(clip["start"] + value, 2)  # an absolute time: keep it readable
-        old = _literal_or_refuse(src, call.args[0], "the at() time")
+        arg = call.args[0]
+        if number_of(arg) is None and isinstance(arg, ast.Name):
+            found = loop_element(src, call, arg, clip.get("occurrence"))
+            if found is not None:
+                node, loop = found
+                return Plan([set_number(src, node, new_t)],
+                            f"pass {clip['occurrence'] + 1} of the loop at line {loop.lineno}: "
+                            f"{src.text(node)} → {fmt(new_t, src.text(node))}",
+                            checks={"duration": value, "one_pass": True})
+        off = _offset_literal(arg)
+        if off is not None and clip.get("duration") is not None:
+            # at(a + 1.2): a time relative to a spoken line (or TARGET). Retiming
+            # moves this anchor only, so only the offset changes: a + 1.3.
+            node, base, sign = off
+            delta = new_t - (clip["start"] + clip["duration"])
+            c = round(number_of(node) + sign * delta, 2)
+            if c >= 0:
+                edit = set_number(src, node, c)
+                a, b = src.span(arg)
+                n0, n1 = src.span(node)
+                text = (src.data[a:n0] + fmt(c, src.text(node)).encode() + src.data[n1:b]).decode("utf-8")
+            elif node is arg.right:  # a + 0.1 → a - 0.2, and back
+                text = f"{src.text(base)} {'-' if sign > 0 else '+'} {fmt(-c, src.text(node))}"
+                edit = Edit(*src.span(arg), text)
+            else:
+                raise EditError(f"the at() time {src.text(arg)} would need a negative offset; "
+                                "change it in the code")
+            return Plan([edit], f"self.at({src.text(arg)}) → self.at({text})", checks={"duration": value})
+        old = _literal_or_refuse(src, arg, "the at() time")
         return Plan([set_number(src, call.args[0], new_t)],
                     f"self.at({fmt(old)}) → self.at({fmt(new_t)})",
                     checks={"duration": value})
@@ -134,6 +227,20 @@ def _wait_duration(src, clip, name, value) -> Plan:
     _literal_or_refuse(src, node, "the wait time")
     return Plan([set_number(src, node, value)], f"wait {src.text(node)} → {fmt(value, src.text(node))}",
                 checks={"duration": value})
+
+
+def _offset_literal(arg):
+    """`a + 1.2`, `1.2 + a`, `self.TARGET - 0.6` → (the number node, the
+    other side, +1 when a bigger number means later, else -1). The other
+    side must be a plain name or attribute (a time the code already has)."""
+    if not (isinstance(arg, ast.BinOp) and isinstance(arg.op, (ast.Add, ast.Sub))):
+        return None
+    plain = (ast.Name, ast.Attribute)
+    if number_of(arg.right) is not None and isinstance(arg.left, plain):
+        return arg.right, arg.left, (1 if isinstance(arg.op, ast.Add) else -1)
+    if isinstance(arg.op, ast.Add) and number_of(arg.left) is not None and isinstance(arg.right, plain):
+        return arg.left, arg.right, 1
+    return None
 
 
 def _play_runtime(src, clip, value) -> Plan:

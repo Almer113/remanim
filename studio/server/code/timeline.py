@@ -1213,3 +1213,56 @@ def plan_section_delete(src: Source, scene: str, sec: dict) -> Plan:
         e = Edit(s0, s1, "pass")
     return Plan([e], f"section {sec.get('name')!r} removed (line {st.lineno})",
                 checks={"section_gone": sec.get("name")})
+
+
+# -- dead anchors (Phase 4 exit §3.2, Phase 5 step 3) ------------------------------
+def _anchor_calls(src: Source, scene: str) -> list:
+    """`self.at(...)` statements in the scene's own construct(), in order
+    (nested functions excluded)."""
+    from .inserts import scene_construct
+    try:
+        fn = scene_construct(src, scene)
+    except EditError:
+        return []
+    out = []
+
+    def walk(body):
+        for s in body:
+            if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and _is_self(s.value, "at"):
+                out.append(s)
+            for name in ("body", "orelse", "finalbody"):
+                inner = getattr(s, name, None)
+                if isinstance(inner, list) and not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                                    ast.ClassDef)):
+                    walk(inner)
+    walk(fn.body)
+    return out
+
+
+def _waiting(stmts: list, trace: dict) -> list[bool]:
+    """Which of these at() statements made the scene wait in `trace`."""
+    calls = {tuple(ev["call"]) for ev in trace.get("events", []) if ev.get("call") and ev["kind"] == "wait"}
+    return [(s.value.lineno, s.value.col_offset, s.value.end_lineno, s.value.end_col_offset) in calls
+            for s in stmts]
+
+
+def dead_anchors(old: Source, old_trace: dict, new: Source, new_trace: dict, scene: str) -> tuple[list[Edit], str]:
+    """Edits on `new` removing the `self.at(t)` calls this edit left with
+    nothing to wait for (they waited before, and now the scene is already
+    past t). Nothing is removed when the edit added or removed at() calls,
+    because matching them up would be a guess. Removing one changes no
+    timing: it no longer waits."""
+    a, b = _anchor_calls(old, scene), _anchor_calls(new, scene)
+    if not a or len(a) != len(b):
+        return [], ""
+    before, after = _waiting(a, old_trace), _waiting(b, new_trace)
+    dead = [s for s, w0, w1 in zip(b, before, after) if w0 and not w1]
+    if not dead:
+        return [], ""
+    from .inserts import _remove_stmts
+    try:
+        edits = _remove_stmts(new, dead)
+    except EditError:
+        return [], ""
+    what = ", ".join(f"{new.text(s.value)} (line {s.lineno})" for s in dead)
+    return edits, f"; removed {what}: it no longer waits for anything"

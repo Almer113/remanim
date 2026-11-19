@@ -12,7 +12,7 @@ approved 2026-11-18. Phase 2 done 2026-11-18: exit criteria met
 (`docs/phase2/exit_report.md`). Phase 3 done 2026-11-18: exit criteria met
 (`docs/phase3/exit_report.md`), reviewed in `docs/review_phase3.md`. Phase 4
 done 2026-11-19: exit criterion met (`docs/phase4/exit_report.md`). Phase 5
-is next.
+done 2026-11-20: revised targets accepted (`docs/phase5/exit_report.md`).
 
 ## 1. Decisions already made
 
@@ -227,8 +227,8 @@ captions. Sections and markers.
 
 **Status (2026-11-19): done.** Plan in `docs/phase4/plan.md`, results in
 `docs/phase4/exit_report.md`. The re-cut renders and passes `audio_check.py`.
-Open: `ClippedGrid` with a constant part count (needs a `manim_kit.py`
-change) and removing no-op `at()` anchors.
+Reviewed in `docs/review_phase4.md`; `ClippedGrid` now keeps a constant
+part count. Open: removing no-op `at()` anchors (Phase 5, step 3).
 
 ### Phase 5. Coverage (XL)
 
@@ -238,6 +238,13 @@ handles). Presets. More tier-1 and tier-2 patterns, driven by the census.
 
 **Exit:** measured against the corpus: every file plays, and the editable share
 meets the target set after S5.
+
+**Status (2026-11-20): built; exit check done** (`docs/phase5/exit_report.md`).
+Census 95.1% and the corpus run (every file plays) meet their targets. Drags
+92.7% (96.8% without updater-driven objects) and retimable clips 77.0%
+(94.0% of clips not locked by design) are short; the report lists why and
+suggests revised targets, accepted by the user 2026-11-20: Phase 5 done. Open: moving
+along z in 3D, an out-of-camera view for 2D cameras.
 
 ### Phase 6. Polish and release readiness (M)
 

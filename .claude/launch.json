@@ -12,6 +12,12 @@
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "studio.server"],
       "port": 8770
+    },
+    {
+      "name": "manim-studio-tailnet",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "studio.server", "--allow-host", "your-pc.your-tailnet.ts.net"],
+      "port": 8770
     }
   ]
 }

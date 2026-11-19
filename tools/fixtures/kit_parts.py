@@ -60,6 +60,12 @@ class GridFade(Scene):
                 seen.add(len(g._draw().family_members_with_points()))
             g.tracker.set_value(0)
             assert len(seen) == 1, f"part count changes with the tracker: {sorted(seen)}"
+        # shift / move_to move the frame and the drawn grid together, at once
+        c0 = squash.mobject.get_center()
+        squash.shift(0.5 * UP)
+        assert np.allclose(squash.mobject.get_center(), c0 + 0.5 * UP), "shift didn't move the grid"
+        squash.move_to(RIGHT * 4)
+        assert np.allclose(squash.mobject.get_center(), c0), "move_to didn't put it back"
         spin.tracker.add_updater(lambda m, dt: m.increment_value(dt / 3))
         self.add(spin.tracker)
         self.play(FadeIn(spin.mobject), FadeIn(squash.mobject), run_time=1)

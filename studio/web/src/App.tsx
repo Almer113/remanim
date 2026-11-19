@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Conn, frameUrl, query } from "./api";
-import type { Clip, DiffHunk, LibItem, Model, Obj, SceneModel } from "./types";
+import type { CameraState, Clip, DiffHunk, Ghost, LibItem, Literal, Model, Obj, SceneModel, Span } from "./types";
 import { Canvas, type Gesture } from "./Canvas";
 import { Library } from "./Library";
 import { Timeline } from "./Timeline";
@@ -29,7 +29,7 @@ export function App() {
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(() => localStorageGet("studio.muted") === "1");
   // objects belong to one frame of one revision; anything else is stale
-  const [objs, setObjs] = useState<{ key: string; list: Obj[] }>({ key: "", list: [] });
+  const [objs, setObjs] = useState<{ key: string; list: Obj[]; camera?: CameraState | null; ghosts?: Ghost[] | null }>({ key: "", list: [] });
   const [sel, setSel] = useState<Selection>(null);
   const [others, setOthers] = useState<string[]>([]);  // shift-click adds to the selection
   const [leftTab, setLeftTab] = useState<"layers" | "library">("layers");
@@ -99,6 +99,26 @@ export function App() {
   const session = model?.session ?? "";
   const frameKey = model && scene ? `${model.session}|${model.rev}|${scene.name}|${f}` : "";
   const objects = objs.key === frameKey ? objs.list : [];
+  const [camCanvas, setCamCanvas] = useState(false);
+  // a 3D scene's first frame: where the scene before ends, for the continuity warning
+  const [prevCam, setPrevCam] = useState<{ key: string; scene: string; cam: CameraState } | null>(null);
+  const prevScene = model && scene ? model.scenes[model.scenes.findIndex((s) => s.name === scene.name) - 1] : undefined;
+  const prevKey = model && prevScene && !prevScene.pending ? `${model.session}|${model.rev}|${prevScene.name}` : "";
+  const wantPrev = f === 0 && objs.key === frameKey && objs.camera?.kind === "3d" && !!prevKey;
+  useEffect(() => {
+    if (!wantPrev || !model || !prevScene || prevCam?.key === prevKey) return;
+    let gone = false;
+    fetch(`/objects?${query(model.file, prevScene.name, model.rev, Math.max(0, prevScene.frames - 1), session)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!gone && d?.camera) setPrevCam({ key: prevKey, scene: prevScene.name, cam: d.camera }); })
+      .catch(() => {});
+    return () => { gone = true; };
+  }, [wantPrev, prevKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the selected play() is under the playhead: show where its transforms go (step 8)
+  const selClip = sel?.kind === "clip" && scene ? scene.clips[sel.clip] : null;
+  const ghosts: Ghost[] | null = selClip && objs.key === frameKey && objs.ghosts
+    && selClip.start - 1e-6 <= f / fps && f / fps < selClip.start + selClip.duration
+    ? objs.ghosts.filter((g) => sel?.kind !== "clip" || sel.anim === null || g.index === sel.anim) : null;
 
   useEffect(() => {
     if (f > nFrames - 1) setF(nFrames - 1);
@@ -120,7 +140,7 @@ export function App() {
       fetch(`/objects?${query(model.file, scene.name, model.rev, f, session)}`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (!gone) setObjs({ key, list: d && d.objects ? d.objects : [] });
+          if (!gone) setObjs({ key, list: d && d.objects ? d.objects : [], camera: d?.camera ?? null, ghosts: d?.ghosts ?? null });
         })
         .catch(() => { if (!gone) setObjs({ key, list: [] }); });
     }, 60);
@@ -301,6 +321,26 @@ export function App() {
   }, [sel]);
 
   const canEdit = ready && !busy && !preview && !err && rest && !playing;
+  const [textEdit, setTextEdit] = useState<Obj | null>(null);
+  useEffect(() => setTextEdit(null), [model?.rev, scene?.name, f]);
+  const onTextDone = useCallback(async (changes: { span: Span; value: string }[] | null) => {
+    setTextEdit(null);
+    if (!changes?.length) return;
+    // every changed part in one edit: one undo step
+    sendEdit({ type: "edit.literal", changes: changes.map((c) => ({ span: c.span, value: { string: c.value } })) });
+  }, [sendEdit]);
+  // part colour: pick glyphs of the selected text on the canvas, then a colour
+  const [partPick, setPartPick] = useState<Obj | null>(null);
+  useEffect(() => setPartPick(null), [model?.rev, scene?.name, f]);
+  const onPartDone = useCallback((pick: { glyphs: number[]; colour: string } | null) => {
+    const o = partPick;
+    setPartPick(null);
+    if (!pick || !o) return;
+    sendEdit({ type: "edit.part_colour", object: o, f, glyphs: pick.glyphs, value: { name: pick.colour } });
+  }, [partPick, sendEdit, f]);
+  const onLiteral = useMemo(() => canEdit
+    ? (lit: Literal, value: object) => sendEdit({ type: "edit.literal", span: lit.span, value })
+    : null, [canEdit, sendEdit]);
 
   const onGesture = useCallback((g: Gesture) => {
     if (g.kind === "move") sendEdit({ type: "edit.move", object: g.obj, f, dx: g.dx, dy: g.dy });
@@ -316,6 +356,9 @@ export function App() {
     }
     if (item.kind === "shape") {
       sendEdit({ type: "edit.insert", class: item.class, x, y, f, ...(item.entrance ? { entrance: item.entrance } : {}) });
+    } else if (item.kind === "composite") {
+      if (item.onObject && !on) { toast("info", "Drop it on an object"); return; }
+      sendEdit({ type: "edit.composite", preset: item.preset, x, y, f, ...(item.onObject ? { object: on } : {}) });
     } else if (on) {
       sendEdit({ type: "edit.preset", object: on, preset: item.preset, f });
     } else {
@@ -324,7 +367,7 @@ export function App() {
   }, [canEdit, sendEdit, f, toast, busy, playing, rest]);
 
   const onPick = useCallback((item: LibItem) => {
-    if (item.kind === "shape") onDrop(item, 0, 0, null);
+    if (item.kind === "shape" || (item.kind === "composite" && !item.onObject)) onDrop(item, 0, 0, null);
     else if (sel?.kind === "object") onDrop(item, 0, 0, sel.obj);
     else toast("info", `Select an object first, or drag ${item.preset} onto one`);
   }, [onDrop, sel, toast]);
@@ -515,6 +558,18 @@ export function App() {
                 onDrop={onDrop}
                 editable={canEdit}
                 stale={!!err}
+                onTextEdit={canEdit ? setTextEdit : null}
+                textEdit={textEdit}
+                onTextDone={onTextDone}
+                partPick={partPick}
+                glyphUrl={partPick ? `/glyphs?${query(model.file, scene.name, model.rev, f, session)}&id=${encodeURIComponent(partPick.id)}` : null}
+                onPartDone={onPartDone}
+                ghosts={ghosts}
+                camera={camCanvas && canEdit && objs.key === frameKey && objs.camera ? {
+                  cam: objs.camera, onCommit: (m: object) => sendEdit({ type: "edit.camera", f, ...m }),
+                  onClose: () => setCamCanvas(false) } : null}
+                onMatch={canEdit && sel?.kind === "clip" ? (arg, sk, tk) => sendEdit({ type: "edit.match_parts",
+                  clip: sel.clip, arg, source_key: sk, target_key: tk }) : null}
               />
             ) : (
               <div className="canvas-placeholder">{err ? "The file doesn't run — see the error" : "Tracing the scene…"}</div>
@@ -534,7 +589,11 @@ export function App() {
           <aside className="panel inspector">
             <Inspector sel={sel} scene={scene && !scene.pending ? scene : null} model={model} busy={busy || !!preview} f={f}
               onScreen={sel?.kind !== "object" || selOnScreen} sendEdit={sendEdit}
-              actions={{ remove: doDelete, duplicate: doDuplicate, group: doGroup, count: selectedObjs.length }} />
+              camera={canEdit && objs.key === frameKey ? objs.camera ?? null : null}
+              prevCamera={wantPrev && prevCam?.key === prevKey ? prevCam : null}
+              camCanvas={{ on: camCanvas, toggle: () => setCamCanvas((v) => !v) }}
+              actions={{ remove: doDelete, duplicate: doDuplicate, group: doGroup, count: selectedObjs.length,
+                partColour: canEdit && sel?.kind === "object" && selOnScreen ? () => setPartPick(sel.obj) : null }} />
           </aside>
 
           <section className="timeline-wrap">
@@ -551,7 +610,9 @@ export function App() {
           </section>
 
           <section className="code-wrap">
-            {model && <CodePeek source={model.source} span={peekSpan} diff={lastDiff} file={model.file} />}
+            {model && <CodePeek source={model.source} span={peekSpan} diff={lastDiff} file={model.file}
+              literals={model.literals}
+              onLiteral={onLiteral} />}
           </section>
         </div>
       )}

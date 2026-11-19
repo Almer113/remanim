@@ -16,7 +16,10 @@ Word timings from Edge are passed on as manim-voiceover "word boundaries", so
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import edge_tts
@@ -44,12 +47,18 @@ class EdgeTTSService(SpeechService):
         # (934 entries for 95 lines), every say() re-parsed all of it, and
         # two processes writing it at once corrupted it. A hit is returned
         # as stored, without writing.
-        if kwargs.get("path") is None and self.global_speed == 1:
-            norm = " ".join(text.split())  # as the base class does
-            cached = self.get_cached_result(self._input_data(norm), self.cache_dir)
-            if cached is not None and "final_audio" in cached:
-                return cached
-        return super()._wrap_generate_from_text(text, **kwargs)
+        #
+        # Several processes (a render, the preview server, studio workers) can
+        # meet the same new line at once. cache.json is read-modify-written, so
+        # the whole lookup-or-synthesise runs under a lock file in the cache
+        # folder: the second process waits, then finds the first one's entry.
+        with _cache_lock(Path(self.cache_dir)):
+            if kwargs.get("path") is None and self.global_speed == 1:
+                norm = " ".join(text.split())  # as the base class does
+                cached = self.get_cached_result(self._input_data(norm), self.cache_dir)
+                if cached is not None and "final_audio" in cached:
+                    return cached
+            return super()._wrap_generate_from_text(text, **kwargs)
 
     def generate_from_text(self, text: str, cache_dir=None, path=None, **kwargs) -> dict:
         cache_dir = Path(cache_dir or self.cache_dir)
@@ -62,7 +71,9 @@ class EdgeTTSService(SpeechService):
 
         audio_path = path_to_string(path) if path else self.get_audio_basename(input_data) + ".mp3"
         audio, words = self._synthesise(input_text)
-        (cache_dir / audio_path).write_bytes(audio)
+        tmp = cache_dir / (audio_path + f".{os.getpid()}.tmp")
+        tmp.write_bytes(audio)
+        os.replace(tmp, cache_dir / audio_path)  # never a half-written mp3
 
         return {
             "input_text": text,
@@ -121,3 +132,40 @@ def _to_word_boundaries(text: str, words: list[dict]) -> list[dict]:
         })
         pos = start + len(word)
     return out
+
+
+LOCK_WAIT_S = 600  # longer than one line's worst case (4 attempts x 45 s)
+
+
+@contextmanager
+def _cache_lock(cache_dir: Path):
+    """An exclusive lock between processes on `cache_dir/.cache.lock`."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    f = open(cache_dir / ".cache.lock", "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            deadline = time.monotonic() + LOCK_WAIT_S
+            while True:
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"voiceover cache {cache_dir} stayed locked for {LOCK_WAIT_S} s")
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    finally:
+        f.close()

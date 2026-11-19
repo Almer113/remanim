@@ -624,3 +624,124 @@ def new_file_text(scene: str = "NewScene", target: float = 5.0) -> str:
         "    def construct(self):\n"
         "        apply_background()\n"
     )
+
+
+# -- composite presets (Phase 5, step 12) ------------------------------------------------
+# Several statements written as one insert (one undo step), reading like code a
+# person would write. Free-standing ones are placed where they are dropped;
+# the others go on the selected object.
+COMPOSITES = ("graph", "number_line", "vector", "equation", "title_card", "brace", "highlight", "surface")
+ON_OBJECT = {"brace", "highlight"}
+# seconds after the first play() starts when the main object is surely on screen (the replay checks it)
+SEEN = {"graph": 1.0, "number_line": 1.0, "vector": 0.6, "equation": 1.2, "title_card": 0.8, "brace": 0.6,
+        "highlight": 0.9, "surface": 1.5}
+
+
+def _composite_lines(which: str, n, style: bool, at: str, target: str | None):
+    """(setup lines, play lines, total run time, main name)."""
+    acc, fg = ("ACCENT", "FG") if style else ("BLUE", "WHITE")
+    hi = "ACCENT_2" if style else "YELLOW"
+    move = f".move_to({at})" if at != "ORIGIN" else ""
+    if which == "graph":
+        axes, curve, label, graph = n("axes"), n("curve"), n("curve_label"), n("graph")
+        return ([f"{axes} = Axes(x_range=[-3, 3, 1], y_range=[-1, 5, 1], x_length=6, y_length=4)",
+                 f"{curve} = {axes}.plot(lambda x: 0.5 * x**2, color={acc})",
+                 f'{label} = {axes}.get_graph_label({curve}, r"\\frac{{x^2}}{{2}}")',
+                 f"{graph} = VGroup({axes}, {curve}, {label}){move}"],
+                [f"self.play(Create({axes}), Create({curve}), Write({label}), run_time=2)"], 2.0, graph)
+    if which == "number_line":
+        line, k, dot = n("number_line"), n("tracker"), n("marker")
+        return ([f"{line} = NumberLine(x_range=[0, 10, 1], length=8, include_numbers=True){move}",
+                 f"{k} = ValueTracker(2)",
+                 f"{dot} = always_redraw(lambda: Dot({line}.n2p({k}.get_value()), color={hi}))",
+                 f"self.add({line}, {dot})"],
+                [f"self.play({k}.animate.set_value(8), run_time=2)"], 2.0, line)
+    if which == "vector":
+        vec, label, group = n("vec"), n("vec_label"), n("vector")
+        return ([f"{vec} = Arrow(ORIGIN, 2 * RIGHT + UP, buff=0, color={hi})",
+                 f'{label} = MathTex(r"\\vec{{v}}", color={hi}).next_to({vec}.get_end(), UR, buff=0.1)',
+                 f"{group} = VGroup({vec}, {label}){move}"],
+                [f"self.play(GrowArrow({vec}), Write({label}), run_time=1)"], 1.0, group)
+    if which == "equation":
+        a, b = n("eq"), n("eq")
+        return ([f'{a} = MathTex("a^2", "+", "b^2", "=", "c^2", color={fg}){move}',
+                 f'{b} = MathTex("c^2", "=", "a^2", "+", "b^2", color={fg}).move_to({a})'],
+                [f"self.play(Write({a}), run_time=1)", "self.wait(0.5)",
+                 f"self.play(TransformMatchingTex({a}, {b}), run_time=1.5)"], 3.0, a)
+    if which == "title_card":
+        title, sub = n("title"), n("subtitle")
+        make = (f'place(Text("Title", font_size=TITLE_SIZE, color=FG), "title")' if style
+                else 'Text("Title", font_size=48).to_edge(UP)')
+        size = "BODY_SIZE" if style else "32"
+        dim = ", color=MUTED" if style else ", color=GREY"
+        return ([f"{title} = {make}",
+                 f'{sub} = Text("Subtitle", font_size={size}{dim}).next_to({title}, DOWN)'],
+                [f"self.play(Write({title}), FadeIn({sub}, shift=0.2 * UP), run_time=1.2)"], 1.2, title)
+    if which == "brace":
+        br, label = n("brace"), n("brace_label")
+        return ([f"{br} = Brace({target}, DOWN, color={hi})",
+                 f'{label} = {br}.get_text("label")'],
+                [f"self.play(GrowFromCenter({br}), FadeIn({label}), run_time=0.8)"], 0.8, br)
+    if which == "highlight":
+        box = n("box")
+        return ([f"{box} = SurroundingRectangle({target}, color={hi}, buff=0.15)"],
+                [f"self.play(Create({box}), run_time=0.8)", "self.wait(0.5)",
+                 f"self.play(FadeOut({box}), run_time=0.6)"], 1.9, box)
+    if which == "surface":
+        axes, surf, land = n("axes"), n("surface"), n("landscape")
+        lo, mid, top = ("ACCENT", "ACCENT_2", "FG") if style else ("BLUE", "GREEN", "YELLOW")
+        return ([f"{axes} = ThreeDAxes(x_range=[-3, 3, 1], y_range=[-3, 3, 1], z_range=[-1, 2, 1],",
+                 f"                  x_length=6, y_length=6, z_length=3)",
+                 f"{surf} = Surface(lambda u, v: {axes}.c2p(u, v, np.sin(u) * np.cos(v)),",
+                 f"                  u_range=[-3, 3], v_range=[-3, 3], resolution=(16, 16),",
+                 f"                  fill_opacity=0.85, checkerboard_colors=False)",
+                 f"{surf}.set_fill_by_value(axes={axes}, colorscale=[{lo}, {mid}, {top}], axis=2)",
+                 f"{land} = VGroup({axes}, {surf})"],
+                [f"self.play(Create({axes}), FadeIn({surf}), run_time=2)"], 2.0, land)
+    raise EditError(f"{which} isn't a preset")
+
+
+def _is_3d(src: Source, scene: str, bases) -> bool:
+    if bases and any("ThreeD" in b for b in bases):
+        return True
+    cls = next((c for c in src.tree.body if isinstance(c, ast.ClassDef) and c.name == scene), None)
+    return cls is not None and any("ThreeD" in src.text(b) or "3D" in src.text(b) for b in cls.bases)
+
+
+def plan_composite(src: Source, scene: str, events: list, fps: float, timed: bool, which: str,
+                   x: float, y: float, t: float, obj: dict | None = None, bases=None) -> Plan:
+    if which not in COMPOSITES:
+        raise EditError(f"{which} isn't a preset")
+    fn = scene_construct(src, scene)
+    if which == "surface" and not _is_3d(src, scene, bases):
+        raise EditError("the 3D surface needs a ThreeDScene; change the scene's base class first")
+    target = None
+    if which in ON_OBJECT:
+        if not obj:
+            raise EditError(f"drop the {which.replace('_', ' ')} on an object")
+        target = reference(src, obj, fn)
+    taken: set = set()
+
+    def n(base):
+        name = fresh_name(src, base, taken)
+        taken.add(name)
+        return name
+
+    style = uses_style(src)
+    # a title card goes to the top; a brace or box goes on its object
+    # a surface sits on its axes at the origin (a drop point on screen isn't a place in 3D)
+    at = "ORIGIN" if which in ON_OBJECT or which in ("title_card", "surface") else delta_expr(round(x, 2), round(y, 2))
+    setup, plays, rt, main = _composite_lines(which, n, style, at, target)
+    tilt = ""
+    if which == "surface":
+        from .camera import _camera_stmts
+        if not _camera_stmts(src, fn):  # looking straight down a surface shows a flat square
+            setup = ["self.set_camera_orientation(phi=65 * DEGREES, theta=-45 * DEGREES)"] + setup
+            tilt = ", camera tilted"
+    sl = slot(src, fn, events, t, fps, timed, rt)
+    lines = setup + _timeline_lines(sl, t, timed, fps, plays[0]) + plays[1:]
+    start = _start(sl, t, timed)
+    label = which.replace("_", " ")
+    return Plan(_emit(src, sl, lines), f"{label} ({len(setup) + len(plays)} lines) at {start:.2f} s{tilt}"
+                f"{_pushed(sl, t, timed, fps, rt, events)}",
+                checks={"name": main, "start": start, "run_time": rt, "composite": which, "seen": SEEN[which]})

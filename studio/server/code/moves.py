@@ -14,6 +14,7 @@ dragging back by the same amount restores the file byte for byte.
 from __future__ import annotations
 
 import ast
+import contextvars
 import math
 from dataclasses import dataclass
 
@@ -247,9 +248,56 @@ def _parent_binop(root, node):
     return None
 
 
+# axes on screen while a drag is planned: name -> {"o", "ex", "ey"} (engine `coords`)
+COORDS: contextvars.ContextVar[dict] = contextvars.ContextVar("COORDS", default={})
+GRAPH_POINT = {"c2p": 2, "coords_to_point": 2, "n2p": 1, "number_to_point": 1}
+
+
+def edit_graph_point(src: Source, expr, dx: float, dy: float) -> list[Edit] | None:
+    """`axes.c2p(1, 2)` dragged by (dx, dy) in the scene → the numbers in
+    axis units (`axes.c2p(1.5, 2.25)`); `line.n2p(3)` along its line. None
+    when the call isn't that shape, the axes aren't on screen, or (for a
+    number line) the drag leaves the line."""
+    if not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute)
+            and expr.func.attr in GRAPH_POINT and isinstance(expr.func.value, ast.Name)):
+        return None
+    n = GRAPH_POINT[expr.func.attr]
+    if len(expr.args) != n or expr.keywords or any(number_of(a) is None for a in expr.args):
+        return None
+    c = COORDS.get().get(expr.func.value.id)
+    if not c:
+        return None
+    if n == 2 and "ey" in c:
+        (a, b), (p, q) = c["ex"], c["ey"]
+        det = a * q - b * p
+        if abs(det) < 1e-9:
+            return None
+        du, dv = (dx * q - dy * p) / det, (a * dy - b * dx) / det
+        deltas = (du, dv)
+    elif n == 1:
+        a, b = c["ex"]
+        L2 = a * a + b * b
+        if L2 < 1e-12:
+            return None
+        du = (dx * a + dy * b) / L2
+        if math.hypot(dx - du * a, dy - du * b) > 0.05 * max(math.hypot(dx, dy), 1e-6) + 1e-3:
+            return None  # off the line: a shift says it better
+        deltas = (du,)
+    else:
+        return None
+    out = []
+    for arg, d in zip(expr.args, deltas):
+        if abs(d) > 1e-6:
+            out.append(_renum(src, arg, round(number_of(arg) + d, 3)))
+    return out
+
+
 def edit_vector(src: Source, expr, dx: float, dy: float) -> list[Edit] | None:
     """Edits that add (dx, dy) to a literal vector expression, touching only
     the numbers that change; None if the expression isn't that shape."""
+    g = edit_graph_point(src, expr, dx, dy)
+    if g is not None:
+        return g
     elts = _vector_list(expr)
     if elts is not None:
         out = []
@@ -393,6 +441,12 @@ def plan_shift_on(src: Source, mv: dict, dx: float, dy: float) -> tuple[list, st
     if call is None or (mv.get("kind") != "animate" and _is_self_call(call)):
         return None
     name = Source.call_name(call)
+    # 0. made at a point in graph coordinates: Dot(axes.c2p(1, 2))
+    pt = call.args[0] if call.args else (Source.keyword(call, "point").value if Source.keyword(call, "point") else None)
+    if pt is not None and mv.get("kind") not in ("animate",) and name not in ("shift", "move_to"):
+        e = edit_graph_point(src, pt, dx, dy)
+        if e is not None:
+            return e, f"{src.text(pt.func)}() point changed (line {call.lineno})"
     # 1. the call itself takes a literal vector
     if isinstance(call.func, ast.Attribute) and name in ("shift", "move_to") and len(call.args) == 1 \
             and not call.keywords:

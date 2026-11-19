@@ -435,6 +435,31 @@ class ClippedGrid:
     def center(self):
         return np.array(self.frame[1], dtype=float)
 
+    def shift(self, *vectors):
+        """Move the frame (and the grid inside it) like a mobject's shift, so
+        `ClippedGrid(...).shift(RIGHT)` reads and works as it would on any
+        Manim object. Returns self."""
+        d = np.zeros(3)
+        for v in vectors:
+            v = np.array(v, dtype=float)
+            d[: len(v)] += v
+        kind, c, *rest = self.frame
+        c3 = np.zeros(3)
+        c = np.array(c, dtype=float)
+        c3[: len(c)] = c
+        self.frame = (kind, c3 + d, *rest)
+        self.mobject.become(self._draw())  # now, not at the next redraw
+        return self
+
+    def move_to(self, point):
+        """Put the frame's centre at `point`. Returns self."""
+        p = np.zeros(3)
+        q = np.array(point, dtype=float)
+        p[: len(q)] = q
+        c = np.zeros(3)
+        c[: len(self.center)] = self.center
+        return self.shift(p - c)
+
     def _clip(self, p, q):
         if self.frame[0] == "rect":
             _, c, w, h = self.frame

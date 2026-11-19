@@ -77,6 +77,11 @@ button.pri { background: var(--sel); border-color: var(--sel); color: #fff; }
 .code .ln { color: #5a606b; display: inline-block; width: 36px; user-select: none; }
 .code .hl { background: #22324a; }
 .code .add { background: #1e3a28; }
+.code .lit { cursor: pointer; border-bottom: 1px dotted transparent; }
+.code .hl .lit, .code .lit:hover, .code .lit:focus { border-bottom-color: #6b8fd6; outline: none; }
+.code .lit:hover, .code .lit:focus { background: #2b3f63; }
+.code .lit-edit { font: inherit; background: #0d0f13; color: inherit; border: 1px solid #6b8fd6; border-radius: 3px; padding: 0 2px; margin: -1px 0; }
+.code .lit-edit.bad { border-color: var(--bad); }
 .code .del { background: #3d2220; text-decoration: line-through; color: #c98a80; }
 .row { display: grid; grid-template-columns: 92px 1fr; gap: 6px; align-items: center; margin-bottom: 5px; }
 .row label { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
@@ -175,3 +180,43 @@ button.ghost { background: transparent; border-color: transparent; padding: 0 4p
   padding: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.45); }
 .easing-grid button { display: flex; flex-direction: column; align-items: center; padding: 2px; font-size: 10px; line-height: 1.1; }
 .easing-grid button.on { border-color: var(--sel); }
+
+/* in-place text editing (Phase 5) */
+.text-editor { position: absolute; z-index: 6; margin-top: 6px; background: #181b22; border: 1px solid #6b8fd6; border-radius: 6px; padding: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 4px; max-width: 90%; }
+.text-editor .te-head { font-size: 11px; color: var(--dim); }
+.text-editor textarea { font-family: var(--mono); font-size: 13px; background: #0d0f13; color: inherit; border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; resize: vertical; min-width: 220px; }
+.text-editor textarea:focus { outline: none; border-color: #6b8fd6; }
+.text-editor .te-fixed { font-family: var(--mono); font-size: 12px; color: var(--dim); padding: 2px 5px; border: 1px dashed var(--line); border-radius: 4px; }
+.text-editor .te-hint { font-size: 10px; color: var(--dim); }
+
+/* part colour: glyph picking over the canvas (Phase 5 step 6) */
+.glyph-layer { position: absolute; inset: 0; z-index: 5; cursor: crosshair; }
+.glyph-layer .glyph { position: absolute; border: 1px dashed rgba(107,143,214,.55); border-radius: 2px; cursor: pointer; }
+.glyph-layer .glyph:hover { background: rgba(107,143,214,.18); }
+.glyph-layer .glyph.on { background: rgba(255,214,90,.28); border: 1px solid #ffd65a; }
+.glyph-msg { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: #181b22; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 12px; max-width: 80%; }
+.glyph-bar { position: absolute; margin-top: 8px; background: #181b22; border: 1px solid #6b8fd6; border-radius: 6px; padding: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.45); max-width: 360px; display: flex; flex-direction: column; gap: 4px; cursor: default; }
+.glyph-bar .gb-head { font-size: 11px; color: var(--dim); }
+.glyph-bar .gb-head code { color: inherit; font-family: var(--mono); }
+.glyph-bar .gb-swatches { display: flex; flex-wrap: wrap; gap: 3px; }
+.glyph-bar .gb-swatches button { font-size: 10px; padding: 1px 5px; }
+
+/* transform ghost (step 8) */
+.ghost-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+.ghost-target { position: absolute; border: 1.5px dashed rgba(255,255,255,.75); border-radius: 3px; }
+.ghost-target.faint { border-color: rgba(255,255,255,.3); }
+.ghost-tag { position: absolute; left: 0; top: 100%; margin-top: 3px; font-size: 10px; white-space: nowrap; background: #181b22; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; color: var(--dim); }
+.ghost-part { position: absolute; border: 1.5px solid; border-radius: 2px; }
+.ghost-part.mapped { border-style: dashed; }
+.ghost-part.loose { border: 1px dashed rgba(170,170,170,.7); }
+.ghost-part.pickable { pointer-events: auto; cursor: pointer; }
+.ghost-part.pickable:hover { background: rgba(255,214,90,.18); }
+.ghost-part.on { background: rgba(255,214,90,.3); border: 1.5px solid #ffd65a; }
+
+/* camera on the canvas (steps 9, 10) */
+.camera-layer { position: absolute; inset: 0; z-index: 6; cursor: grab; outline: 2px solid rgba(88,196,221,.55); outline-offset: -2px; }
+.camera-layer:active { cursor: grabbing; }
+.camera-hud { position: absolute; left: 8px; top: 8px; display: flex; gap: 8px; align-items: center; background: rgba(24,27,34,.9); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 11px; color: var(--dim); cursor: default; }
+.camera-layer .orbit { position: absolute; right: 8px; bottom: 8px; pointer-events: none; }
+.warn { color: var(--warm); font-size: 11px; }
+.btns-row button.on { border-color: var(--sel); }

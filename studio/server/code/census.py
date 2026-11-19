@@ -13,6 +13,14 @@ from collections import Counter, defaultdict
 BUILTINS = {"range", "len", "min", "max", "abs", "round", "list", "tuple", "zip", "enumerate",
             "float", "int", "str", "sum", "sorted", "reversed"}
 
+# calls whose lambda arguments are formulas, not code: graphs and surfaces,
+# point maps (`apply_function`), and the kit grid's matrix of time
+PLOTTERS = {"plot", "plot_parametric_curve", "plot_polar_graph", "plot_implicit_curve", "get_graph",
+            "plot_surface", "FunctionGraph", "ParametricFunction", "ImplicitFunction", "Surface",
+            "ParametricSurface", "OpenGLSurface", "get_area", "plot_derivative_graph",
+            "apply_function", "apply_complex_function", "ApplyPointwiseFunction", "ApplyComplexFunction",
+            "ClippedGrid"}
+
 # methods that read or set state and are part of the editable vocabulary
 METHODS_T1 = {
     "play", "wait", "add", "remove", "at", "say", "line", "bring_to_front", "bring_to_back",
@@ -81,15 +89,38 @@ class Census:
             return 2
         if isinstance(e, ast.FormattedValue):
             return max(2, self.expr_tier(e.value))
-        if isinstance(e, ast.Compare) or isinstance(e, ast.BoolOp) or isinstance(e, ast.IfExp):
-            return 3
-        if isinstance(e, ast.Lambda):
+        if isinstance(e, ast.IfExp):
+            # `0.7 if k < 3 else 0.45`: both branches' values (and the
+            # condition's) are editable literals; the choice itself is code
+            return max(2, self.cond_tier(e.test), self.expr_tier(e.body), self.expr_tier(e.orelse))
+        if isinstance(e, (ast.Compare, ast.BoolOp, ast.Lambda)):
             return 3
         return 3
 
+    def cond_tier(self, e) -> int:
+        """A condition inside a conditional expression: comparisons of
+        tier-1/2 values are tier 2 (their literals are editable)."""
+        if isinstance(e, ast.Compare):
+            return max([2, self.expr_tier(e.left)] + [self.expr_tier(c) for c in e.comparators])
+        if isinstance(e, ast.BoolOp):
+            return max([2] + [self.cond_tier(v) for v in e.values])
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.Not):
+            return max(2, self.cond_tier(e.operand))
+        return self.expr_tier(e)
+
+    def curve_tier(self, e) -> int:
+        """A lambda handed to a plotting call (`axes.plot(lambda x: x**2)`):
+        a formula of its parameters, tier 2 when the body is (its numbers
+        are editable; Phase 5 step 7 edits the formula itself)."""
+        if isinstance(e, ast.Lambda) and not e.args.vararg and not e.args.kwarg:
+            return max(2, self.expr_tier(e.body))
+        return self.expr_tier(e)
+
     def call_tier(self, c: ast.Call) -> int:
         f = c.func
-        args = [self.expr_tier(a) for a in c.args] + [self.expr_tier(k.value) for k in c.keywords]
+        fname = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+        arg = self.curve_tier if fname in PLOTTERS else self.expr_tier
+        args = [arg(a) for a in c.args] + [arg(k.value) for k in c.keywords]
         worst = max([1] + args)
         if isinstance(f, ast.Name):
             if f.id in self.api or f.id in self.helpers:
@@ -133,11 +164,13 @@ class Census:
             for b in s.body:
                 self.stmt(b, where)
         elif isinstance(s, ast.For):
+            # A loop over values the GUI can edit (a literal list, range(3), a
+            # named constant, a group, a slice of one): the header's own
+            # values are editable; a constant is edited where it is made.
             it = s.iter
-            simple = isinstance(it, (ast.List, ast.Tuple)) or (
-                isinstance(it, ast.Call) and isinstance(it.func, ast.Name)
-                and it.func.id in ("range", "enumerate", "zip"))
-            self.add(2 if simple and self.expr_tier(it) <= 2 else 3, s, where, header=True)
+            simple_target = all(isinstance(t, ast.Name) for t in ast.walk(s.target)
+                                if not isinstance(t, (ast.Tuple, ast.List, ast.Store)))
+            self.add(2 if simple_target and self.expr_tier(it) <= 2 else 3, s, where, header=True)
             for b in s.body + s.orelse:
                 self.stmt(b, where)
         elif isinstance(s, ast.If):

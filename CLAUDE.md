@@ -146,6 +146,8 @@ Never say a scene is done or fixed without running these and looking at the resu
   `EdgeTTSService` overrides `_wrap_generate_from_text` so cache hits don't
   write `cache.json`: manim-voiceover 0.4.0 appends an entry on every line,
   hits included, which bloated and then corrupted the file. Keep the override.
+  It also runs under a lock file (`media/voiceovers/.cache.lock`), so two
+  processes meeting the same new line synthesise it once. Keep that too.
 - Scenes subclass a `Beat(VoiceoverScene)` with a `say(spoken, caption=...)`
   context manager (see `pythagoras.py`). Animations inside the `with` block run
   during that line. Use `<bookmark mark='x'/>` in the spoken text plus

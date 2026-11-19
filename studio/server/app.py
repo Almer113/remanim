@@ -22,6 +22,11 @@ SKIP_DIRS = {".venv", "media", "node_modules", ".git", "studio/server", "studio/
 HIDDEN_DIRS = {"studio/tests/tmp"}  # copies the tests make: openable, but not listed
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 DEV_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}  # `npm run dev` (vite proxy)
+TRUSTED_HOSTS: set[str] = set()  # opt-in extra names (`--allow-host`), e.g. a tailnet proxy; empty by default
+
+
+def _known_host(name: str) -> bool:
+    return name in LOCAL_HOSTS or name in TRUSTED_HOSTS
 
 
 def _host_name(host: str) -> str:
@@ -35,7 +40,7 @@ def _same_server(origin: str, host: str) -> bool:
     """http://localhost:8770 and http://127.0.0.1:8770 are both this server."""
     scheme, _, rest = origin.partition("://")
     port = lambda h: h.rsplit(":", 1)[1] if ":" in h and not h.endswith("]") else ""  # noqa: E731
-    return scheme in ("http", "https") and _host_name(rest) in LOCAL_HOSTS and port(rest) == port(host)
+    return scheme in ("http", "https") and _known_host(_host_name(rest)) and port(rest) == port(host)
 
 
 @web.middleware
@@ -43,7 +48,7 @@ async def local_only(req: web.Request, handler):
     """Opening a file runs it and edits write code, so only this machine's
     own pages may talk to the server: the Host must be local (no DNS
     rebinding) and a browser's Origin must be this server."""
-    if _host_name(req.host or "") not in LOCAL_HOSTS:
+    if not _known_host(_host_name(req.host or "")):
         raise web.HTTPForbidden(text="the studio only answers on localhost")
     origin = req.headers.get("Origin")
     if origin is not None and origin not in DEV_ORIGINS and not _same_server(origin, req.host):
@@ -226,7 +231,24 @@ async def objects(req: web.Request):
     _still(doc, rev)
     if "error" in r:
         return web.json_response({"error": r["error"]}, status=500)
-    return web.json_response({"objects": r.get("objects", []), "rev": doc.rev, "f": _int(q, "f")})
+    return web.json_response({"objects": r.get("objects", []), "camera": r.get("camera"),
+                              "ghosts": r.get("ghosts"), "rev": doc.rev,
+                              "f": _int(q, "f")})
+
+
+async def glyphs(req: web.Request):
+    """One Text / MathTex / Tex's glyph boxes and the source characters
+    behind each (Phase 5 step 6). Asked for when the user selects inside a
+    formula, since the first probe of a formula costs a LaTeX compile."""
+    doc = _doc(req)
+    q = req.query
+    rev = _int(q, "rev", doc.rev)
+    _still(doc, rev)
+    r = await doc.glyphs(q["scene"], _int(q, "f"), q.get("id", ""))
+    _still(doc, rev)
+    if "error" in r:
+        return web.json_response({"error": r["error"]}, status=500)
+    return web.json_response({"glyphs": r.get("glyphs"), "rev": doc.rev, "f": _int(q, "f"), "id": q.get("id")})
 
 
 async def idmap(req: web.Request):
@@ -390,10 +412,12 @@ async def handle(msg: dict) -> dict | None:
         await doc.activate(msg["scene"])
         await doc.send_model()
         return None
-    if t in ("edit.timing", "edit.prop", "edit.move", "edit.scale", "edit.rotate", "edit.insert",
+    if t in ("edit.timing", "edit.prop", "edit.move", "edit.scale", "edit.rotate", "edit.insert", "edit.composite",
              "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip",
              "edit.voice", "edit.shift", "edit.offset", "edit.merge", "edit.split", "edit.reorder",
-             "edit.scene_order", "edit.section"):
+             "edit.scene_order", "edit.section", "edit.literal",
+             "edit.part_colour", "edit.curve",
+             "edit.transform_kind", "edit.match_parts", "edit.camera"):
         return await doc.edit(msg)
     if t == "edit.confirm":
         return await doc.confirm(msg["token"])
@@ -433,6 +457,7 @@ def make_app() -> web.Application:
     app.router.add_get("/frame", frame)
     app.router.add_get("/objects", objects)
     app.router.add_get("/idmap", idmap)
+    app.router.add_get("/glyphs", glyphs)
     app.router.add_get("/audio", sound)
     app.router.add_get("/audio/peaks", sound_peaks)
     app.router.add_get("/ws", ws_handler)

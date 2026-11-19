@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import type { LibItem, Obj } from "./types";
+import type { CameraState, Ghost, LibItem, Obj, TextArg } from "./types";
+import { TextEditor } from "./TextEditor";
+import { GlyphPicker } from "./GlyphPicker";
+import { TransformGhost } from "./TransformGhost";
+import { CameraGizmo } from "./CameraGizmo";
 import { fixedLines, joinLines, objectLines, snapMove, tidy, type Box, type Lines } from "./guides";
 
 export interface Gesture { obj: Obj; kind: "move" | "scale" | "rotate"; dx: number; dy: number; k: number; deg: number }
@@ -19,6 +23,19 @@ interface Props {
   onDrop: (item: LibItem, x: number, y: number, on: Obj | null) => void;
   editable: boolean;
   stale: boolean;
+  /** Double-click on a text object: edit it in place (null: not possible now). */
+  onTextEdit?: ((o: Obj) => void) | null;
+  textEdit?: Obj | null;
+  onTextDone?: (changes: { span: NonNullable<TextArg["span"]>; value: string }[] | null) => void;
+  /** Part colour: pick glyphs of this text (null: not picking). */
+  partPick?: Obj | null;
+  glyphUrl?: string | null;
+  onPartDone?: (pick: { glyphs: number[]; colour: string } | null) => void;
+  /** The selected transform clip under the playhead: where it is going (step 8). */
+  ghosts?: Ghost[] | null;
+  onMatch?: ((index: number, sourceKey: string, targetKey: string) => void) | null;
+  /** Camera mode: drags and the wheel move the camera instead of objects. */
+  camera?: { cam: CameraState; onCommit: (m: object) => void; onClose: () => void } | null;
 }
 
 type Drag = {
@@ -262,6 +279,15 @@ export function Canvas(p: Props) {
     const base = { obj: o, kind: dr.kind, dx: 0, dy: 0, k: 1, deg: 0, gx: null, gy: null };
     if (!o.box) return base;
     const cx = (o.box[0] + o.box[2]) / 2, cy = (o.box[1] + o.box[3]) / 2;
+    if (dr.kind === "move" && o.proj) {
+      // 3D: the drag moves it on the world's floor (x-y), solved through the camera
+      const sx = (dr.x - dr.x0) / pxPerUnit, sy = -(dr.y - dr.y0) / pxPerUnit;
+      const [a, b] = o.proj.ex, [c, d] = o.proj.ey, det = a * d - b * c;
+      if (Math.abs(det) < 0.05) return base;  // the floor is seen edge-on
+      let wx = (sx * d - sy * c) / det, wy = (a * sy - b * sx) / det;
+      if (dr.shift) { if (Math.abs(wx) > Math.abs(wy)) wy = 0; else wx = 0; }
+      return { ...base, dx: tidy.dist(wx), dy: tidy.dist(wy) };
+    }
     if (dr.kind === "move") {
       let ddx = (dr.x - dr.x0) / pxPerUnit, ddy = -(dr.y - dr.y0) / pxPerUnit;
       if (dr.shift) { if (Math.abs(ddx) > Math.abs(ddy)) ddy = 0; else ddx = 0; }
@@ -515,6 +541,11 @@ export function Canvas(p: Props) {
     <div className={`canvas ${stale ? "stale" : ""}`} ref={wrap}
       style={{ "--ar": `${width / height}` } as React.CSSProperties}
       onMouseDown={onDown}
+      onDoubleClick={() => {
+        // the first click of the two already selected the owner (a glyph picks its Text)
+        const o = objects.find((x) => x.id === selected);
+        if (o && p.onTextEdit && o.texts?.some((t) => t.editable)) p.onTextEdit(o);
+      }}
       onMouseMove={onHover}
       onMouseLeave={() => setHover(null)}
       onDragOver={onDragOver}
@@ -522,6 +553,22 @@ export function Canvas(p: Props) {
       onDrop={onDrop}>
       {shown && <img ref={img} src={shown} alt="frame" draggable={false} />}
       <canvas ref={overlay} width={width} height={height} />
+      {p.textEdit && p.onTextDone && (() => {
+        const b = p.textEdit.box;
+        const style: React.CSSProperties = b
+          ? { left: `${(b[0] / width) * 100}%`, top: `${(b[3] / height) * 100}%`, minWidth: `${((b[2] - b[0]) / width) * 100}%` }
+          : { left: "10%", top: "10%" };
+        return <TextEditor key={p.textEdit.id} obj={p.textEdit} style={style} onDone={p.onTextDone} />;
+      })()}
+      {p.camera && !p.partPick && !p.textEdit && (
+        <CameraGizmo cam={p.camera.cam} img={img} onCommit={p.camera.onCommit} onClose={p.camera.onClose} />
+      )}
+      {p.ghosts && p.ghosts.length > 0 && !drag && !p.partPick && !p.textEdit && (
+        <TransformGhost ghosts={p.ghosts} frameW={frameW} frameH={frameH} onMatch={p.onMatch ?? null} />
+      )}
+      {p.partPick && p.glyphUrl && p.onPartDone && (
+        <GlyphPicker key={p.glyphUrl} obj={p.partPick} url={p.glyphUrl} frameW={frameW} frameH={frameH} onDone={p.onPartDone} />
+      )}
       {hover && !drag && <div className="hover-tag">{hover.name ?? hover.class}{hover.tier === 3 ? " 🔒" : ""}</div>}
       {failed ? <div className="frame-msg">⚠ This frame didn't render: {failed}</div>
         : slow ? <div className="frame-msg">Rendering this frame…</div> : null}

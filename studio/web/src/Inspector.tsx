@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import type { Model, SceneModel } from "./types";
+import type { CameraState, Model, SceneModel } from "./types";
 import type { Selection } from "./App";
 import { EasingPicker } from "./Easing";
 
-const COLORS = ["FG", "MUTED", "ACCENT", "GOOD", "BAD", "WHITE", "BLUE", "TEAL", "GREEN", "YELLOW", "GOLD",
-  "RED", "MAROON", "PURPLE", "PINK", "ORANGE", "GREY"];
+import { COLORS } from "./GlyphPicker";
+
+const TEXT_KINDS = new Set(["Text", "MathTex", "Tex"]);
 
 interface Props {
   sel: Selection;
@@ -14,7 +15,13 @@ interface Props {
   f: number;
   onScreen: boolean;
   sendEdit: (msg: object) => void;
-  actions: { remove: () => void; duplicate: () => void; group: () => void; count: number };
+  /** the camera at the playhead, when it can be edited (2D moving camera or 3D) */
+  camera?: CameraState | null;
+  /** the camera at the end of the scene before, when this is a 3D scene's first frame */
+  prevCamera?: { scene: string; cam: CameraState } | null;
+  /** drag the camera on the canvas */
+  camCanvas?: { on: boolean; toggle: () => void } | null;
+  actions: { remove: () => void; duplicate: () => void; group: () => void; count: number; partColour?: (() => void) | null };
 }
 
 /** Parse a typed number and run `go`; returns the reason when it isn't one. */
@@ -66,7 +73,62 @@ function Field({ label, value, onCommit, disabled, title }: {
   );
 }
 
-export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, actions }: Props) {
+/** Camera at the playhead (Phase 5 steps 9, 10): edits the camera move before
+ * it, or the 3D orientation, as the code writes them. */
+function CameraPanel({ cam, busy, f, sendEdit, scene, prev, canvas }: {
+  cam: CameraState; busy: boolean; f: number; sendEdit: (m: object) => void;
+  scene: SceneModel | null; prev?: { scene: string; cam: CameraState } | null; canvas?: { on: boolean; toggle: () => void } | null;
+}) {
+  const go = (m: object) => sendEdit({ type: "edit.camera", f, ...m });
+  const onCanvas = canvas && (
+    <div className="btns-row"><button className={canvas.on ? "on" : ""} disabled={busy} onClick={canvas.toggle}
+      title={cam.kind === "2d" ? "Drag the frame to pan, scroll to zoom" : "Drag to orbit, scroll to zoom"}>
+      {canvas.on ? "Done moving the camera" : "Move on canvas"}</button></div>
+  );
+  if (cam.kind === "2d") {
+    return (
+      <div>
+        <h4>Camera</h4>
+        {onCanvas}
+        <Field label="centre x" value={cam.center[0].toFixed(2)} disabled={busy}
+          onCommit={(v) => num(v, (n) => { go({ center: [n, cam.center[1]] }); })} />
+        <Field label="centre y" value={cam.center[1].toFixed(2)} disabled={busy}
+          onCommit={(v) => num(v, (n) => { go({ center: [cam.center[0], n] }); })} />
+        <Field label="width" value={cam.width.toFixed(2)} disabled={busy} title="Smaller is closer"
+          onCommit={(v) => num(v, (n) => n > 0 ? go({ width: n }) : "more than 0")} />
+      </div>
+    );
+  }
+  return (
+    <div>
+      <h4>Camera (3D)</h4>
+      {onCanvas}
+      {(["phi", "theta", "zoom"] as const).map((k) => (
+        <Field key={k} label={k === "zoom" ? "zoom" : `${k} °`} value={cam[k].toFixed(k === "zoom" ? 2 : 1)} disabled={busy}
+          onCommit={(v) => num(v, (n) => k === "zoom" && n <= 0 ? "more than 0" : go({ [k]: n }))} />
+      ))}
+      {prev && prev.cam.kind === "3d" && (() => {
+        const p = prev.cam;
+        const off = (["phi", "theta"] as const).filter((k) => Math.abs(((cam[k] - p[k] + 540) % 360) - 180) > 1);
+        const z = Math.abs(cam.zoom - p.zoom) > 0.01;
+        if (!off.length && !z) return null;
+        return (
+          <div className="warn small-gap" title="A cut between scenes jumps when the camera doesn't start where the last scene ended">
+            ⚠ {prev.scene} ends at {off.map((k) => `${k} ${p[k].toFixed(1)}°`).concat(z ? [`zoom ${p.zoom.toFixed(2)}`] : []).join(", ")}.
+            {" "}<button disabled={busy} onClick={() => go({ phi: p.phi, theta: p.theta, ...(z ? { zoom: p.zoom } : {}) })}>Start here instead</button>
+          </div>
+        );
+      })()}
+      {(scene?.ambient ?? []).map((a, i) => (
+        <Field key={`amb${i}`} label="ambient rate" title={`begin_ambient_camera_rotation on line ${a.line}: radians per second`}
+          value={a.value !== null ? String(a.value) : a.text} disabled={busy || !a.span}
+          onCommit={(v) => num(v, (n) => { sendEdit({ type: "edit.literal", span: a.span, value: { number: n } }); })} />
+      ))}
+    </div>
+  );
+}
+
+export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, actions, camera, prevCamera, camCanvas }: Props) {
   const [newProp, setNewProp] = useState("");
   const [newVal, setNewVal] = useState("");
   const [newErr, setNewErr] = useState<string | null>(null);
@@ -76,6 +138,7 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
         <h3>Inspector</h3>
         <div className="muted">Click an object on the canvas or in Layers, or a clip on the timeline.</div>
         <div className="muted small-gap">Edits are written to the .py file only after a replay shows they do exactly what you asked. Undo restores the file byte for byte.</div>
+        {camera && <CameraPanel cam={camera} busy={busy} f={f} sendEdit={sendEdit} scene={scene} prev={prevCamera} canvas={camCanvas} />}
       </div>
     );
   }
@@ -111,6 +174,15 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
               disabled={!!locked || busy} onPick={(name) => edit("rate_func", name)} />
           </div>
         )}
+        {(c.transforms ?? []).map((t, k) => t && (
+          <div className="row" key={k} title="What is on screen afterwards differs: Transform keeps the source, Replacement/Fade show the target, FromCopy both">
+            <label>{t.source} → {t.target}</label>
+            <select value={t.kind} disabled={!!locked || busy}
+              onChange={(e) => sendEdit({ type: "edit.transform_kind", clip: c.index, arg: k, kind: e.target.value })}>
+              {t.kinds.map((x) => <option key={x}>{x}</option>)}
+            </select>
+          </div>
+        ))}
         {a && (a.offset ?? 0) > 0 && (
           <div className="row"><label>Starts in group</label><span className="mono">+{(a.offset ?? 0).toFixed(2)} s</span></div>
         )}
@@ -124,7 +196,7 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
   }
 
   const o = sel.obj;
-  const locked = !o.site ? "made inside library code: select its owner" : o.tier === 3 ? "tier 3 code: edit it in the code" : null;
+  const locked = !o.site ? (o.curve ? "drawn by the plot call on its line: edit its formula above; move or copy its axes" : "made inside library code: select its owner") : o.tier === 3 ? "tier 3 code: edit it in the code" : null;
   const kwargs = o.kwargs ?? {};
   const params = o.params ?? [];
   const positional = (o.args ?? []).map((v, i) => [params[i] ?? `arg ${i}`, v] as const)
@@ -159,7 +231,26 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
         <button disabled={busy || off || actions.count < 2} onClick={actions.group}
           title="Group the selection (Ctrl+G); Shift-click to add objects">Group{actions.count > 1 ? ` ${actions.count}` : ""}</button>
         <button disabled={!!locked || busy} onClick={actions.remove} title="Delete (Del)">Delete</button>
+        {TEXT_KINDS.has(o.class) && (
+          <button disabled={!!locked || busy || off || !actions.partColour} onClick={() => actions.partColour?.()}
+            title="Colour some letters or symbols of this text">Colour part…</button>
+        )}
       </div>
+      {(o.ranges ?? []).map((r) => (
+        <div key={r.kw}>
+          <h4>{r.kw}</h4>
+          {r.parts.map((pt, j) => (
+            <Field key={j} label={pt.label} value={pt.text} disabled={busy || !pt.span}
+              title={pt.span ? "Enter to apply" : "computed in the code: change it there"}
+              onCommit={(v) => num(v, (n) => { sendEdit({ type: "edit.literal", span: pt.span, value: { number: n } }); })} />
+          ))}
+        </div>
+      ))}
+      {o.curve && (
+        <Field label={`f(${o.curve.params.join(", ")}) =`} value={o.curve.expr} disabled={busy}
+          title="The curve's formula, as Python (np.sin(x), x**2). Checked, then replayed"
+          onCommit={(v) => { sendEdit({ type: "edit.curve", object: o, expr: v }); return null; }} />
+      )}
       {o.color && <div className="row"><label>Colour now</label><span><span className="swatch" style={{ background: o.color }} /> {o.color}</span></div>}
       {locked && <div className="note">🔒 {locked}</div>}
       {!locked && off && <div className="note">Not on screen at this frame: move the playhead to where it shows to edit it.</div>}

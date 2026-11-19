@@ -7,6 +7,13 @@ const SHAPES: [string, string][] = [
   ["Star", "☆"], ["Dot", "•"], ["Line", "—"], ["Arrow", "→"], ["Text", "T"], ["MathTex", "∑"], ["Blob", "◕"],
 ];
 const ENTRANCES = ["", "Create", "Write", "FadeIn", "GrowFromCenter", "DrawBorderThenFill", "GrowArrow", "SpinInFromNothing"];
+// Mirrors inserts.py COMPOSITES / ON_OBJECT.
+const COMPOSITES: [string, string, boolean][] = [
+  ["graph", "Axes + curve + label", false], ["number_line", "Number line + moving dot", false],
+  ["vector", "Labelled vector", false], ["equation", "Equation reveal", false], ["title_card", "Title card", false],
+  ["brace", "Brace + label", true], ["highlight", "Highlight box", true],
+  ["surface", "3D surface (ThreeDScene)", false],
+];
 const PRESETS = ["Indicate", "Circumscribe", "Wiggle", "Flash", "ApplyWave", "FocusOn", "FadeOut", "Uncreate", "ShrinkToCenter"];
 
 interface Props {
@@ -51,6 +58,19 @@ export function Library({ disabled, hasSelection, onPick }: Props) {
             {p}
           </button>
         ))}
+      </div>
+      <h4>Presets <small>several lines, one undo</small></h4>
+      <div className="lib-list">
+        {COMPOSITES.map(([id, label, onObject]) => {
+          const item: LibItem = { kind: "composite", preset: id, onObject };
+          return (
+            <button key={id} className="lib-item wide" draggable={!disabled} disabled={disabled}
+              onDragStart={drag(item)} onClick={() => onPick(item)}
+              title={onObject ? `Drop on an object, or select one and click` : `Drag to place it, or click for the centre at the playhead`}>
+              {label}
+            </button>
+          );
+        })}
       </div>
       <div className="muted small-gap">Each drop becomes ordinary Manim code at the playhead's time, checked by a replay before it is written.</div>
     </div>

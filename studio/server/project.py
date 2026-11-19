@@ -18,12 +18,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .code import inserts
+from .code import literals as literalplan
 from .code import moves as moveplan
 from .code import planner
+from .code import tex as texplan
+from .code import graphs as graphplan
+from .code import transforms as transformplan
+from .code import camera as cameraplan
 from .code import timeline
 from .code.census import classify, summary
 from .code.source import Source, Span
-from .code.splice import Edit, EditError, apply, write_atomic
+from .code.splice import Edit, EditError, apply, number_of, write_atomic
 from .host import WorkerHandle
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -85,12 +90,25 @@ def _stop_reason(err: dict) -> str:
     """Why an edited scene was refused, with a hint for errors whose cause
     is in the scene rather than in the edit."""
     m = err.get("message", "")
+    tex = latex_error(m)
+    if tex:
+        return f"LaTeX can't compile the new text: {tex}" + (f" (line {err['line']})" if err.get("line") else "")
     why = f"the edited scene stops with {m}" + (f" (line {err['line']})" if err.get("line") else "")
     if "zip()" in m and "families_zipped" in (err.get("traceback") or ""):
         why += (". An object changed its number of parts while an animation ran, most often a "
                 "FadeIn/FadeOut of an always_redraw object (a ClippedGrid) that is still moving; "
                 "the edit only changed the timing it happens at. Fade it while it is still")
     return why
+
+
+def latex_error(message: str) -> str | None:
+    """LaTeX's own words, which the engine adds to a TeX error as "[LaTeX:
+    ...]" (it reads the log at once: Manim deletes it after the next
+    compile); "see the LaTeX log" when it couldn't; None if this isn't one."""
+    if "error converting to" not in message:
+        return None
+    m = re.search(r"\[LaTeX: (.*)\]\s*$", message)
+    return m.group(1) if m else "see the LaTeX log"
 
 
 _BOOKMARK = re.compile(r"<bookmark\s+mark\s*=\s*['\"][^'\"]*['\"]\s*/>")
@@ -233,6 +251,27 @@ class Document:
         self.frames.put(key, r)
         return r
 
+    async def glyphs(self, scene: str, f: int, oid: str) -> dict:
+        """The glyph map of object `oid` at frame f ({"glyphs": None} when
+        the object isn't text, or the probe doesn't match what it draws)."""
+        if scene not in self.traces:
+            return {"error": {"message": f"no scene {scene!r} traced in this revision", "code": "scene"}}
+        if not oid:
+            return {"glyphs": None}
+        f = max(0, min(int(f), self.frame_count(scene) - 1))
+        key = (self.rev, scene, f, "glyphs", oid)
+        hit = self.frames.get(key)
+        if hit is not None:
+            return hit
+        r = await self.worker.request({"op": "frame", "scene": scene, "f": f, "ids": oid,
+                                       "size": "half", "fmt": "jpeg"})
+        if "error" in r:
+            return r
+        o = next((o for o in r.get("objects", []) if o.get("id") == oid), None)
+        out = {"glyphs": (o or {}).get("glyphs")}
+        self.frames.put(key, out)
+        return out
+
     def _restarted(self):
         """The worker was replaced (crash or deadline): it has nothing loaded.
         Reload, but not forever: code that hangs on every load stays an error
@@ -251,12 +290,71 @@ class Document:
         site = o.get("site") or o.get("user_site")
         o["name"] = self._label(o.get("chain_spans") or []) or             (self.name_at(o.get("site")) if o.get("site") else None)
         o["tier"] = self.tier_at(site[0]) if site else 3
+        if site:
+            # a curve: made by the user's plot call even when Manim builds it (user_site)
+            curve = graphplan.describe_curve(self.src, site)
+            if curve is not None and self.tier_at(site[0]) <= 2:
+                o["curve"] = curve
         if o.get("site"):
             call = self.src.find_call(Span(*o["site"]))
             if call is not None:
                 o["call_text"] = self.src.text(call)[:300]
                 o["kwargs"] = {k.arg: self.src.text(k.value)[:120] for k in call.keywords if k.arg}
                 o["args"] = [self.src.text(a)[:120] for a in call.args]
+                if o.get("class") in TEXT_CLASSES:
+                    o["texts"] = self._texts(call)
+                if o.get("class") in AXES_CLASSES:
+                    o["ranges"] = self._ranges(call)
+                elif Source.call_name(call) in AREA_CALLS:
+                    o["ranges"] = self._ranges(call, AREA_KW)  # an area or Riemann sum (step 7)
+        elif o.get("user_site") and self.tier_at(o["user_site"][0]) <= 2:
+            # made inside Manim by the user's axes.get_area(...) call: its numbers are still the user's
+            call = self.src.find_call(Span(*o["user_site"]))
+            if call is not None and Source.call_name(call) in AREA_CALLS:
+                o["ranges"] = self._ranges(call, AREA_KW)
+
+    def _texts(self, call) -> list[dict]:
+        """The string arguments of a Text / MathTex call, for editing in place
+        (edit.literal): span, value, and whether the code can be edited."""
+        ok = self._literal_spans()
+        out = []
+        for a in call.args:
+            if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                span = [a.lineno, a.col_offset, a.end_lineno, a.end_col_offset]
+                out.append({"span": span, "value": a.value, "editable": tuple(span) in ok,
+                            "raw": self.src.text(a)[:1].lower() == "r"})
+            else:
+                out.append({"span": None, "value": None, "editable": False, "code": self.src.text(a)[:80]})
+        return out
+
+    def _ranges(self, call, kws=None) -> list[dict]:
+        """Axes / NumberPlane / NumberLine sizes and ranges (step 7): each
+        number of `x_range=[-3, 3, 1]`, `x_length=6` that the literal edit can
+        change, as {kw, parts: [{span, value, label}]}."""
+        ok = self._literal_spans()
+        names = ("min", "max", "step")
+        out = []
+        for k in call.keywords:
+            if k.arg not in (kws or RANGE_KW):
+                continue
+            v = k.value
+            items = v.elts if isinstance(v, (ast.List, ast.Tuple)) else [v]
+            parts = []
+            for j, e in enumerate(items):
+                n = number_of(e)
+                span = [e.lineno, e.col_offset, e.end_lineno, e.end_col_offset]
+                parts.append({"span": span if n is not None and tuple(span) in ok else None,
+                              "value": n, "text": self.src.text(e)[:40],
+                              "label": names[j] if len(items) > 1 and j < 3 else k.arg})
+            out.append({"kw": k.arg, "parts": parts})
+        return out
+
+    def _literal_spans(self) -> set:
+        c = getattr(self, "_lit_cache", None)
+        if c is None or c[0] is not self.src:
+            spans = {tuple(x["span"]) for x in literalplan.find_literals(self.src, self.census())}                 if self.src.ok else set()
+            self._lit_cache = c = (self.src, spans)
+        return c[1]
 
     def name_at(self, span) -> str | None:
         if not self.src.ok or span is None:
@@ -285,6 +383,30 @@ class Document:
             self._census = (self.src, classify(self.src.tree, self.api))
         return self._census[1].lines.get(line, 1)
 
+    def census(self):
+        self.tier_at(0)  # builds and caches the classification for this source
+        return self._census[1]
+
+    def literal_list(self) -> list[dict]:
+        """Editable values for the code peek, with columns in characters."""
+        if not self.src.ok:
+            return []
+        out = []
+        for x in literalplan.find_literals(self.src, self.census()):
+            l1, c1, l2, c2 = x["span"]
+            a = self.src.offset(l1, 0)
+            cols = [len(self.data[a:self.src.offset(l1, c1)].decode("utf-8", "replace")),
+                    len(self.data[a:self.src.offset(l2, c2)].decode("utf-8", "replace"))]
+            item = {"span": x["span"], "line": l1, "cols": cols, "kind": x["kind"], "text": x["text"],
+                    "scope": x["scope"]}
+            if x["kind"] == "string":
+                try:
+                    item["value"] = ast.literal_eval(x["text"])  # what the user edits, without quotes
+                except (ValueError, SyntaxError):
+                    continue
+            out.append(item)
+        return out
+
     # -- the model sent to the UI ---------------------------------------------
     def model(self) -> dict:
         scenes = []
@@ -300,11 +422,12 @@ class Document:
                 "height": self.meta.get("height", 480), "frame_width": self.meta.get("frame_width", 14.2222),
                 "frame_height": self.meta.get("frame_height", 8.0), "error": self.error, "census": census,
                 "active": self.active, "undo": bool(self.undo), "redo": bool(self.redo),
-                "source": self.data.decode("utf-8", "replace")}
+                "source": self.data.decode("utf-8", "replace"), "literals": self.literal_list()}
 
     def _scene_model(self, tr: dict) -> dict:
         clips, rows = [], OrderedDict()
         n_play = 0
+        seen_calls: dict = {}  # pass of a loop: how many earlier events the same call made
         for i, ev in enumerate(tr["events"]):
             call = self.src.find_call(Span(*ev["call"])) if ev.get("call") and self.src.ok else None
             name = Source.call_name(call) if call is not None else None
@@ -319,7 +442,11 @@ class Document:
                     runtimes.append(_has_runtime(a))
             # Edits and the Inspector work in the code's own numbers (wait(0.5) is 0.5,
             # not the 7 frames = 0.4667 s it plays for at 15 fps).
-            clip = {"index": i, "kind": ev["kind"], "start": ev["start"],
+            key = tuple(ev["call"]) if ev.get("call") else None
+            occurrence = seen_calls.get(key, 0)
+            if key is not None:
+                seen_calls[key] = occurrence + 1
+            clip = {"index": i, "kind": ev["kind"], "start": ev["start"], "occurrence": occurrence,
                     "duration": ev.get("nominal", ev["duration"]), "played": ev["duration"],
                     "call": ev.get("call"), "call_name": name, "func": ev.get("func"),
                     "line": ev.get("call_line"), "in_helper": ev.get("in_helper"), "lock": lock,
@@ -328,6 +455,10 @@ class Document:
                     "text": self.src.text(call)[:200] if call is not None else None}
             if name == "play" and call is not None and Source.keyword(call, "run_time") is not None:
                 clip["play_runtime"] = True
+            if name == "play" and call is not None and not lock:
+                pairs = [transformplan.pair(self.src, ev["call"], k) for k in range(len(call.args))]
+                if any(pairs):
+                    clip["transforms"] = pairs  # per play() argument (step 8)
             if ev["kind"] == "play":
                 clip["play_index"] = n_play
                 n_play += 1
@@ -346,7 +477,34 @@ class Document:
         return {"name": tr["name"], "duration": tr["duration"], "error": tr.get("error"),
                 "bases": tr.get("bases", []), "target": tr.get("target"), "clips": clips,
                 "rows": list(rows.values()), "frames": self.frame_count(tr["name"]), "timed": timed,
+                "ambient": self._ambient(tr["name"]),
                 **self._audio_model(tr, timed)}
+
+    def _ambient(self, scene: str) -> list[dict]:
+        """`self.begin_ambient_camera_rotation(rate=0.1)` in the scene (step 10):
+        each rate as a field the literal edit can change (span None when computed)."""
+        if not self.src.ok:
+            return []
+        try:
+            fn = inserts.scene_construct(self.src, scene)
+        except EditError:
+            return []
+        ok = self._literal_spans()
+        out = []
+        for n in ast.walk(fn):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "begin_ambient_camera_rotation"):
+                continue
+            kw = Source.keyword(n, "rate")
+            e = kw.value if kw is not None else (n.args[0] if n.args else None)
+            if e is None:
+                out.append({"line": n.lineno, "span": None, "value": 0.02, "text": "(default 0.02)"})
+                continue
+            v = number_of(e)
+            span = [e.lineno, e.col_offset, e.end_lineno, e.end_col_offset]
+            out.append({"line": n.lineno, "span": span if v is not None and tuple(span) in ok else None,
+                        "value": v, "text": self.src.text(e)[:40]})
+        return sorted(out, key=lambda x: x["line"])
 
     def _audio_model(self, tr: dict, timed: bool) -> dict:
         """Narration lines, captions and other sounds, with what can be edited."""
@@ -457,6 +615,39 @@ class Document:
                     return await self._structural(scene, tr, msg)
                 elif msg["type"] in TIMELINE:
                     return await self._timeline(scene, tr, msg)
+                elif msg["type"] == "edit.camera":
+                    return await self._camera(scene, tr, msg)
+                elif msg["type"] == "edit.part_colour":
+                    return await self._part_colour(scene, tr, msg)
+                elif msg["type"] == "edit.match_parts":
+                    clips = self._scene_model(tr)["clips"]
+                    i, arg = msg.get("clip"), msg.get("arg")
+                    if not isinstance(i, int) or not 0 <= i < len(clips) or clips[i].get("lock"):
+                        return {"type": "edit.refused", "reason": "that clip can't be edited here"}
+                    if not isinstance(arg, int):
+                        return {"type": "edit.refused", "reason": "which animation of the play()?"}
+                    plan = transformplan.plan_key_map(self.src, clips[i]["call"], arg,
+                                                      msg.get("source_key"), msg.get("target_key"))
+                    target = {"kind": "literal"}  # the scene must still run; Manim pairs the keys
+                elif msg["type"] == "edit.transform_kind":
+                    clips = self._scene_model(tr)["clips"]
+                    i = msg.get("clip")
+                    if not isinstance(i, int) or not 0 <= i < len(clips) or clips[i].get("lock"):
+                        return {"type": "edit.refused", "reason": "that clip can't be edited here"}
+                    arg = msg.get("arg")
+                    if not isinstance(arg, int):
+                        return {"type": "edit.refused", "reason": "which animation of the play()?"}
+                    plan = transformplan.plan_kind(self.src, clips[i]["call"], arg, str(msg.get("kind")))
+                    target = {"kind": "literal"}  # the scene must still run
+                elif msg["type"] == "edit.curve":
+                    plan = graphplan.plan_curve(self.src, msg.get("object") or {}, str(msg.get("expr", "")), self.api)
+                    target = {"kind": "literal"}  # the replay must run; the curve is what was typed
+                elif msg["type"] == "edit.literal":
+                    if "changes" in msg:
+                        plan = literalplan.plan_literals(self.src, self.census(), msg.get("changes"))
+                    else:
+                        plan = literalplan.plan_literal(self.src, self.census(), msg.get("span"), msg.get("value") or {})
+                    target = {"kind": "literal"}
                 elif msg["type"] == "edit.prop":
                     obj = msg["object"]
                     plan = planner.plan_property(self.src, obj, msg["prop"], msg["value"])
@@ -488,6 +679,120 @@ class Document:
                                                       "label": "Only this one"}]
                 return reply
             return await self._verify_and_write(scene, new, plan.note, target)
+
+    async def _part_colour(self, scene: str, tr: dict, msg: dict) -> dict:
+        """Colour some glyphs of a Text / MathTex / Tex (step 6). Each
+        candidate edit is replayed; the first where exactly the picked glyphs
+        change colour is written."""
+        obj = msg.get("object") or {}
+        try:
+            f = int(msg.get("f", 0))
+        except (TypeError, ValueError):
+            return {"type": "edit.refused", "reason": "no frame given"}
+        g = await self.glyphs(scene, f, obj.get("id") or "")
+        if "error" in g:
+            return {"type": "edit.refused", "reason": _stop_reason(g["error"])}
+        g = g.get("glyphs")
+        if not g:
+            return {"type": "edit.refused",
+                    "reason": "the studio can't match this text's glyphs to its source"}
+        value = msg.get("value") or {}
+        try:
+            sel = texplan.selection(g, msg.get("glyphs") or [])
+            colour = planner._value_text(self.src, None, value)
+            plans = texplan.candidates(self.src, self._annotated(obj), g, sel, colour)
+        except EditError as e:
+            return {"type": "edit.refused", "reason": str(e)}
+        want = value.get("string") if "string" in value else None
+        reasons = []
+        for plan in plans:
+            new = apply(self.data, plan.edits)
+            if not Source(new).ok:
+                continue
+            target = {"kind": "part_colour"}
+            if plan.confirm:
+                token = hashlib.sha1(new).hexdigest()[:12]
+                self.pending[token] = Pending(token, scene, new, plan.note, plan.edits, plan.checks, target,
+                                              base=self.data)
+                return {"type": "edit.preview", "token": token, "summary": plan.note,
+                        "why": plan.confirm, "diff": self.diff(new)}
+            req = {"op": "verify", "data": new, "scene": scene, "f": f, "glyphs": True,
+                   "object": remap_id(obj.get("id"), self.data, plan.edits)}
+            if "name" in value:
+                req["eval_name"] = value["name"]
+            r = await self.worker.request(req)
+            if "error" in r:
+                reasons.append(f"{plan.note}: the scene doesn't run ({_stop_reason(r['error'])})")
+                continue
+            if (r.get("trace") or {}).get("error"):
+                reasons.append(f"{plan.note}: the scene stops with an error")
+                continue
+            got = (r.get("object") or {}).get("glyphs")
+            hexes = r.get("eval") if "name" in value else want
+            why = texplan.check(g.get("colors") or [], got, sel, hexes if isinstance(hexes, str) else None,
+                                _same_colour)
+            if why is None:
+                return await self._write_verified(new, plan.note)
+            reasons.append(f"{plan.note}: {why}")
+        return {"type": "edit.refused",
+                "reason": "no edit coloured exactly those glyphs: " + "; ".join(reasons[:2] or ["nothing to try"])}
+
+    async def _camera(self, scene: str, tr: dict, msg: dict) -> dict:
+        """Move / zoom a 2D camera frame, or turn a 3D camera, at frame f
+        (steps 9, 10). Verified by the camera's state at f after the replay."""
+        try:
+            f = max(0, int(msg.get("f", 0)))
+        except (TypeError, ValueError):
+            return {"type": "edit.refused", "reason": "no frame given"}
+        fps = self.meta.get("fps", 15)
+        t = round(f / fps, 4)
+        cur = (await self.frame(scene, f, "half", "jpeg")).get("camera")
+        if not cur:
+            return {"type": "edit.refused", "reason": "this scene's camera can't be moved here"}
+
+        def num(v):
+            if v is None:
+                return None
+            x = float(v)
+            if not math.isfinite(x):
+                raise EditError("not a number")
+            return x
+        try:
+            if cur["kind"] == "2d":
+                c = msg.get("center")
+                center = [num(c[0]), num(c[1])] if isinstance(c, (list, tuple)) and len(c) == 2 else None
+                width = num(msg.get("width"))
+                timed = tr.get("timed", "TimedScene" in (tr.get("bases") or []))
+                plan = cameraplan.plan_camera_2d(self.src, scene, tr["events"], fps, timed, t, center, width, cur)
+                want = {"center": center, "width": width}
+            else:
+                values = {k: num(msg.get(k)) for k in ("phi", "theta", "gamma", "zoom")}
+                plan = cameraplan.plan_camera_3d(self.src, scene, tr["events"], t, values)
+                want = {"values": values}
+        except (EditError, TypeError, ValueError) as e:
+            return {"type": "edit.refused", "reason": str(e) if isinstance(e, EditError) else "bad request"}
+        new = apply(self.data, plan.edits)
+        if not Source(new).ok:
+            return {"type": "edit.refused", "reason": "the edit would not parse"}
+        fv = f
+        if "start" in plan.checks:  # an inserted move: look where it has finished
+            fv = int(round((plan.checks["start"] + plan.checks["run_time"]) * fps))
+        elif "verify_at" in plan.checks:  # a camera move running at f: look at its end
+            fv = max(0, int(round(plan.checks["verify_at"] * fps)) - 1)
+        r = await self.worker.request({"op": "verify", "data": new, "scene": scene, "f": fv, "objects": True})
+        if "error" in r:
+            return {"type": "edit.refused", "reason": f"the edited scene doesn't run: {r['error']['message']}"}
+        if r["trace"].get("error"):
+            return {"type": "edit.refused", "reason": _stop_reason(r["trace"]["error"])}
+        why = cameraplan.check(cur["kind"], r.get("camera"), **want)
+        if why:
+            return {"type": "edit.refused", "reason": f"{plan.note}, but {why}"}
+        return await self._write_verified(new, plan.note)
+
+    def _annotated(self, obj: dict) -> dict:
+        o = dict(obj)
+        self._annotate(o)
+        return o
 
     async def confirm(self, token: str) -> dict:
         async with self.edit_lock:
@@ -567,13 +872,29 @@ class Document:
         except (EditError, KeyError, TypeError, ValueError) as e:
             return {"type": "edit.refused", "reason": str(e) if isinstance(e, EditError) else f"bad request: {e}"}
         if not cands:
-            return {"type": "edit.refused", "reason": "no code places this object in a way the studio can edit yet"}
+            why = _why_stuck(obj, None, self.path.name) if kind == "move" else None
+            return {"type": "edit.refused", "reason": "no code places this object in a way the studio can edit yet"
+                    + (f": {why}" if why else "")}
         expect = _expected(kind, obj, amount)
         if expect is None:
             return {"type": "edit.refused", "reason": "the object's position isn't known at this frame"}
         r0 = await self.frame(scene, f, ids=True)
         before_objs = r0.get("objects", []) if "error" not in r0 else []
+        if kind == "move":
+            # axes on screen, by name: a point placed with axes.c2p(x, y) moves in graph units
+            coords = {o["name"]: o["coords"] for o in before_objs if o.get("coords") and o.get("name")}
+            if coords:
+                tok = moveplan.COORDS.set(coords)
+                try:
+                    cands = plan()
+                except EditError:
+                    pass
+                finally:
+                    moveplan.COORDS.reset(tok)
+                plan0 = plan
+                plan = lambda k=1.0: _with_coords(coords, plan0, k)  # noqa: E731
         tried, calibrated = [], False
+        last_got = None
         i = 0
         while i < len(cands) and i < 5:
             c = cands[i]
@@ -598,6 +919,7 @@ class Document:
                 i += 1
                 continue
             got = r.get("object")
+            last_got = got or last_got
             miss = _miss(kind, expect, got)
             if miss and kind == "move" and not calibrated and got and got.get("center"):
                 # a parent scaled the shift (object moved by k * drag): correct once
@@ -624,8 +946,9 @@ class Document:
                 return {"type": "edit.preview", "token": token, "summary": note, "why": c.confirm,
                         "diff": self.diff(new), "also_moves": also}
             return await self._write_verified(new, note)
+        why = _why_stuck(obj, last_got, self.path.name) if kind == "move" else None
         return {"type": "edit.refused", "reason": "no edit put the object where you dragged it"
-                + (f" (tried: {tried[0]})" if tried else ""), "tried": tried}
+                + (f": {why}" if why else f" (tried: {tried[0]})" if tried else ""), "tried": tried}
 
     # -- library drops, presets, duplicate, group, delete (code_spec §4.5, §4.6) -------------
     async def _structural(self, scene: str, tr: dict, msg: dict) -> dict:
@@ -647,6 +970,12 @@ class Document:
                     raise EditError("not a position")
                 plan = inserts.plan_insert(src, scene, events, fps, timed, str(msg.get("class")), x, y, t,
                                            msg.get("entrance"), msg.get("region") or None)
+            elif kind == "edit.composite":
+                x, y = float(msg.get("x", 0)), float(msg.get("y", 0))
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    raise EditError("not a position")
+                plan = inserts.plan_composite(src, scene, events, fps, timed, str(msg.get("preset")), x, y, t,
+                                              msg.get("object"), tr.get("bases"))
             elif kind == "edit.preset":
                 plan = inserts.plan_preset(src, scene, events, fps, timed, msg["object"], str(msg.get("preset")), t)
             elif kind == "edit.duplicate":
@@ -671,9 +1000,11 @@ class Document:
             return {"type": "edit.refused", "reason": "the edit would not parse"}
         ch = plan.checks
         line = None
-        if ch.get("name") and kind in ("edit.insert", "edit.duplicate", "edit.group"):
+        if ch.get("name") and kind in ("edit.insert", "edit.duplicate", "edit.group", "edit.composite"):
             line = _line_of_assignment(new, ch["name"], plan.edits)
-            if "start" in ch:
+            if "seen" in ch:
+                fv = max(0, int(round((ch["start"] + ch["seen"]) * fps)))
+            elif "start" in ch:
                 fv = max(0, int(round((ch["start"] + ch.get("run_time", 0)) * fps)) - 1)
         if kind == "edit.preset":
             fv = max(0, int(round(ch["start"] * fps)) + 1)
@@ -685,7 +1016,7 @@ class Document:
             return {"type": "edit.refused", "reason": _stop_reason(r['trace']['error'])}
         objs = r.get("objects") or []
         why = None
-        if kind in ("edit.insert", "edit.duplicate", "edit.group"):
+        if kind in ("edit.insert", "edit.duplicate", "edit.group", "edit.composite"):
             hit = [o for o in objs if (o.get("site") or [None])[0] == line]
             if not hit:
                 why = "the new object isn't on screen after the edit"
@@ -824,6 +1155,17 @@ class Document:
         same_plays = not ({"order", "merged", "split"} & set(plan.checks))
         note = plan.note + (timeline.knock_on(tr, after, fps, set(plan.checks.get("starts", {}).get("plays", {})))
                             if same_plays else "")
+        if kind in ("edit.shift", "edit.voice", "edit.offset"):
+            # at() calls the edit left waiting for nothing read as if something
+            # happened then; they go too (no timing changes: they don't wait)
+            try:
+                cleanup, extra = timeline.dead_anchors(src, tr, Source(new), after, scene)
+                if cleanup:
+                    tidy = apply(new, cleanup)
+                    if Source(tidy).ok:
+                        new, note = tidy, note + extra
+            except EditError:
+                pass
         return await self._write_verified(new, note)
 
     def _animating(self, tr: dict, obj: dict, f: int) -> str | None:
@@ -856,6 +1198,8 @@ class Document:
         if tr.get("error"):
             return _stop_reason(tr['error'])
         fps = self.meta.get("fps", 15)
+        if target["kind"] == "literal":
+            return None  # the value is what the user typed; the scene must still run
         if target["kind"] == "timing":
             evs = tr["events"]
             i = target["clip"]
@@ -967,7 +1311,11 @@ class Document:
         self.worker.close()
 
 
-STRUCTURAL = ("edit.insert", "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip")
+# objects whose positional string arguments are the text on screen (Phase 5 step 5)
+TEXT_CLASSES = {"Text", "MarkupText", "MathTex", "Tex", "SingleStringMathTex", "Paragraph", "Title",
+                "Variable", "BulletedList"}
+
+STRUCTURAL = ("edit.insert", "edit.composite", "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip")
 TIMELINE = ("edit.voice", "edit.shift", "edit.offset", "edit.merge", "edit.split", "edit.reorder",
             "edit.scene_order", "edit.section")
 
@@ -978,6 +1326,20 @@ def _line_of_assignment(new: bytes, name: str, edits: list) -> int | None:
     text = new.decode("utf-8", "replace")
     m = re.search(rf"^[ \t]*{re.escape(name)} = ", text, re.M)
     return text.count("\n", 0, m.start()) + 1 if m else None
+
+
+AXES_CLASSES = {"Axes", "NumberPlane", "NumberLine", "ThreeDAxes", "ComplexPlane", "PolarPlane"}
+RANGE_KW = ("x_range", "y_range", "z_range", "x_length", "y_length", "z_length", "length")
+AREA_CALLS = {"get_area", "get_riemann_rectangles"}
+AREA_KW = ("x_range", "dx", "fill_opacity", "opacity", "stroke_width")
+
+
+def _with_coords(coords: dict, plan, k: float):
+    tok = moveplan.COORDS.set(coords)
+    try:
+        return plan(k)
+    finally:
+        moveplan.COORDS.reset(tok)
 
 
 def remap_id(oid: str | None, data: bytes, edits: list) -> str | None:
@@ -1031,6 +1393,23 @@ def _expected(kind: str, obj: dict, amount) -> dict | None:
     vx, vy = p0[0] - c[0], p0[1] - c[1]
     return {"center": list(c), "p0": [c[0] + vx * math.cos(a) - vy * math.sin(a),
                                       c[1] + vx * math.sin(a) + vy * math.cos(a)]}
+
+
+def _why_stuck(obj: dict, got: dict | None, fname: str) -> str | None:
+    """Why every candidate missed, when the object says so: something that
+    runs after the edited line puts it back (Phase 5, step 3)."""
+    if obj.get("updaters"):
+        at = obj.get("updater_at")
+        where = f" (line {at[1]})" if at and at[0] == fname else ""
+        return f"an updater{where} redraws it every frame and puts it back; change it in the code"
+    mv = ((got or {}).get("placement") or {}).get("move") or (obj.get("placement") or {}).get("move")
+    if mv and mv.get("kind") == "animation":
+        return (f"the animation on line {mv['site'][0]} carries it afterwards (it follows a path or "
+                "turns about a point); move what it follows, or edit that line")
+    if mv and mv.get("kind") == "animate":
+        return (f"line {mv['site'][0]} moves it afterwards with .animate.{mv.get('method')}() to a place "
+                "worked out from other objects (or a later .animate on it wins); edit that line")
+    return None
 
 
 def _miss(kind: str, expect: dict, got: dict | None, tol: float = 0.011) -> str | None:

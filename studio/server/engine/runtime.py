@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import manim  # noqa: E402
-from manim import ImageMobject, Scene, Succession, VMobject, Wait, config, tempconfig  # noqa: E402
+from manim import DL, UR, ImageMobject, Scene, Succession, VMobject, Wait, config, tempconfig  # noqa: E402
 from manim.renderer.cairo_renderer import CairoRenderer  # noqa: E402
 
 from .identity import OriginTracker, object_id, parent_map, resolve, site_of  # noqa: E402
@@ -87,9 +87,31 @@ def install() -> OriginTracker:
     # hashes the text and every setting, so turning it on is exact.
     orig_text = Text.__init__
 
+    # Manim writes the Pango SVG straight to its cache path, and takes any file
+    # there as finished: a cursor thread could read one another thread is still
+    # writing (a ParseError, "no element found"). Text is made one at a time
+    # per process, and an empty file left by a killed process is cleared.
+    text_lock = threading.RLock()
+
     def text_init(self, *a, use_svg_cache=True, **k):
-        orig_text(self, *a, use_svg_cache=use_svg_cache, **k)
+        with text_lock:
+            try:
+                orig_text(self, *a, use_svg_cache=use_svg_cache, **k)
+            except Exception as e:  # noqa: BLE001
+                if "no element found" not in str(e) or not _clear_empty_text_svgs():
+                    raise
+                orig_text(self, *a, use_svg_cache=use_svg_cache, **k)
     Text.__init__ = text_init
+
+    # TransformMatchingTex/Shapes: keep the key_map it was given, so the
+    # canvas can show those parts as paired (Phase 5 step 8)
+    from manim.animation.transform_matching_parts import TransformMatchingAbstractBase
+    orig_match = TransformMatchingAbstractBase.__init__
+
+    def match_init(self, mobject, target_mobject, *a, key_map=None, **k):
+        self._studio_key_map = dict(key_map or {})
+        orig_match(self, mobject, target_mobject, *a, key_map=key_map, **k)
+    TransformMatchingAbstractBase.__init__ = match_init
 
     try:  # narration length, decoded from the mp3 on every say()
         import manim_kit
@@ -108,6 +130,24 @@ def install() -> OriginTracker:
     return _tracker
 
 
+def _clear_empty_text_svgs() -> bool:
+    """Remove zero-byte Pango SVGs from Manim's text cache (left by a process
+    killed while writing). True if any were removed."""
+    try:
+        d = Path(config.get_dir("text_dir"))
+    except Exception:  # noqa: BLE001
+        return False
+    gone = False
+    for p in d.glob("*.svg"):
+        try:
+            if p.stat().st_size == 0:
+                p.unlink()
+                gone = True
+        except OSError:
+            pass
+    return gone
+
+
 def api_names() -> list[str]:
     names = set(dir(manim))
     for mod in ("manim_kit", "style"):
@@ -119,6 +159,36 @@ def api_names() -> list[str]:
 
 
 # -- helpers ----------------------------------------------------------------
+def _latex_detail(message: str) -> str | None:
+    """LaTeX's own words ("Undefined control sequence", and the TeX it stopped
+    at) from the log a Manim TeX error names, or None."""
+    import re
+    if "error converting to" not in message:
+        return None
+    m = re.search(r"log file:\s*(.+?\.log)", message)
+    if not m:
+        return None
+    try:
+        lines = Path(m.group(1).strip()).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for i, ln in enumerate(lines):
+        if ln.startswith("!"):
+            what = ln[1:].strip().rstrip(".")
+            # "<argument> ...a^2 + \badcommand": the TeX read up to the error, minus
+            # Manim's own \special markers; "l.8 \end{align*}" says nothing useful
+            for x in lines[i + 1:i + 4]:
+                if x.startswith(("<argument>", "<recently read>")):
+                    ctx = x.split(">", 1)[1]
+                    ctx = re.sub(r"\special\s*\{[^}]*\}?", "", ctx)
+                    ctx = re.sub(r"^\s*\.\.\.", "", ctx)
+                    ctx = re.sub(r"^[^{}]*'>\}", "", ctx).strip()
+                    if ctx:
+                        return f"{what}, after \u201c{ctx[-50:]}\u201d"
+            return what
+    return None
+
+
 def _has_time_updaters(scene) -> bool:
     return bool(scene.updaters) or any(
         m.has_time_based_updater() for m in scene.get_mobject_family_members())
@@ -261,26 +331,96 @@ def _id_color(i: int) -> tuple[int, int, int]:
 class Capture:
     """One drawn frame, and optionally the ID map and the objects in it."""
 
-    def __init__(self, frame: np.ndarray, idmap: np.ndarray | None = None, objects=None):
+    def __init__(self, frame: np.ndarray, idmap: np.ndarray | None = None, objects=None, camera=None,
+                 ghosts=None):
         self.frame, self.idmap, self.objects = frame, idmap, objects or []
+        self.camera = camera
+        self.ghosts = ghosts
 
 
-def capture(scene, want_ids: bool) -> Capture:
+def _bbox(m) -> list | None:
+    try:
+        if not m.has_points() and not m.submobjects:
+            return None
+        a, b = m.get_corner(DL), m.get_corner(UR)
+        return [round(float(a[0]), 4), round(float(a[1]), 4), round(float(b[0]), 4), round(float(b[1]), 4)]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def transform_ghosts(animations) -> list:
+    """Where each transform in a play() is going (Phase 5 step 8), worked out
+    when the play starts, before anything moves: per top-level animation,
+    the target's box; for TransformMatchingTex/Shapes, the matched parts
+    (same key on both sides), the unmatched ones, and the keys (TeX text)."""
+    from manim.animation.transform_matching_parts import TransformMatchingAbstractBase, TransformMatchingTex
+    out = []
+    for i, a in enumerate(animations):
+        try:
+            if isinstance(a, TransformMatchingAbstractBase):
+                src, tgt = a.to_remove[0], a.to_add
+                sm, tm = a.get_shape_map(src), a.get_shape_map(tgt)
+                tex = isinstance(a, TransformMatchingTex)
+                name = (lambda k: k) if tex else (lambda k: None)
+                pairs = [{"key": name(k), "source": _bbox(sm[k]), "target": _bbox(tm[k])}
+                         for k in sm if k in tm]
+                mapped = {k1: k2 for k1, k2 in getattr(a, "_studio_key_map", {}).items()
+                          if k1 in sm and k2 in tm and k1 not in tm and k2 not in sm}
+                pairs += [{"key": name(k1), "to": name(k2), "source": _bbox(sm[k1]), "target": _bbox(tm[k2]),
+                           "mapped": True} for k1, k2 in mapped.items()]
+                out.append({"index": i, "kind": type(a).__name__, "target": _bbox(tgt), "pairs": pairs,
+                            "unmatched_source": [{"key": name(k), "box": _bbox(sm[k])} for k in sm
+                                                 if k not in tm and k not in mapped],
+                            "unmatched_target": [{"key": name(k), "box": _bbox(tm[k])} for k in tm
+                                                 if k not in sm and k not in mapped.values()],
+                            "keys": tex})
+            elif getattr(a, "target_mobject", None) is not None and a.target_mobject is not a.mobject:
+                kind = ".animate" if type(a).__name__ == "_MethodAnimation" else type(a).__name__
+                out.append({"index": i, "kind": kind, "target": _bbox(a.target_mobject)})
+        except Exception:  # noqa: BLE001  (an animation the studio can't read: no ghost)
+            continue
+    return out
+
+
+def camera_state(scene) -> dict | None:
+    """The camera at this frame (Phase 5 step 9, 10): a 2D moving camera's
+    frame centre and size, or a 3D camera's angles (degrees) and zoom."""
+    cam = getattr(scene, "camera", None)
+    try:
+        if hasattr(cam, "get_phi"):
+            fc = cam._frame_center.get_center()
+            return {"kind": "3d", "phi": round(float(np.degrees(cam.get_phi())), 3),
+                    "theta": round(float(np.degrees(cam.get_theta())), 3),
+                    "gamma": round(float(np.degrees(cam.get_gamma())), 3),
+                    "zoom": round(float(cam.get_zoom()), 4),
+                    "focal_distance": round(float(cam.get_focal_distance()), 4),
+                    "center": [round(float(fc[0]), 4), round(float(fc[1]), 4), round(float(fc[2]), 4)]}
+        frame = getattr(cam, "frame", None)
+        if frame is not None and hasattr(frame, "get_center"):
+            c = frame.get_center()
+            return {"kind": "2d", "center": [round(float(c[0]), 4), round(float(c[1]), 4)],
+                    "width": round(float(frame.width), 4), "height": round(float(frame.height), 4)}
+    except Exception:  # noqa: BLE001  (a camera the studio doesn't know)
+        return None
+    return None
+
+
+def capture(scene, want_ids: bool, ghosts=None) -> Capture:
     r = scene.renderer
     r.static_image = None
     r.update_frame(scene, ignore_skipping=True)
     frame = r.get_frame().copy()
     if not want_ids:
-        return Capture(frame)
-    idmap, objects = _id_map(scene)
-    return Capture(frame, idmap, objects)
+        return Capture(frame, camera=camera_state(scene))
+    idmap, objects = _id_map(scene, want_ids if isinstance(want_ids, str) else None)
+    return Capture(frame, idmap, objects, camera=camera_state(scene), ghosts=ghosts)
 
 
 _STYLE_ATTRS = ("fill_opacity", "stroke_opacity", "fill_color", "stroke_color", "color",
                 "background_stroke_opacity", "background_stroke_color", "background_stroke_width")
 
 
-def _id_map(scene):
+def _id_map(scene, glyphs_for: str | None = None):
     """Repaint every drawn leaf in a flat colour per selectable object, draw,
     restore the colours exactly. Returns (index image HxW uint32, objects)."""
     parents = parent_map(scene)
@@ -376,6 +516,8 @@ def _id_map(scene):
         hit = valid & (keys[pos] == code)
         out[hit] = vals[pos[hit]]
     described = [describe_object(m, o, how, parents) for m, o, how in objects]
+    if hasattr(cam, "project_points"):
+        _add_projections(cam, objects, described)
     # groups the user made (VGroup(a, b)) are selectable too (alt-click, Layers):
     # they have no pixels of their own, so they come after the drawn objects
     index = {id(m): i for i, (m, _, _) in enumerate(objects)}
@@ -395,7 +537,77 @@ def _id_map(scene):
                 described[child].setdefault("parent", j)
                 child = j
             p = parent_of(p, parents)
+    if glyphs_for is not None:
+        for (m, _, _), d in zip(objects, described):
+            if d.get("id") == glyphs_for:
+                g = glyph_parts(m)
+                if g is not None:
+                    d["glyphs"] = g
+                break
     return out, described
+
+
+def _add_projections(cam, objects, described) -> None:
+    """3D (Phase 5 step 11): for each object not pinned to the screen, the
+    on-screen vector (frame units) of one world unit along x, y and z at its
+    centre, so a drag on the canvas can be turned into a move in the world."""
+    try:
+        fixed = set()
+        for m in getattr(cam, "fixed_in_frame_mobjects", []) or []:
+            fixed.update(id(x) for x in m.get_family())
+    except Exception:  # noqa: BLE001
+        fixed = set()
+    eps = 0.25
+    for (m, _, _), d in zip(objects, described):
+        if id(m) in fixed:
+            continue
+        try:
+            c = np.array(m.get_center(), dtype=float)
+            pts = cam.project_points(np.array([c, c + [eps, 0, 0], c + [0, eps, 0], c + [0, 0, eps]]))
+            e = [((pts[k] - pts[0])[:2] / eps).round(5).tolist() for k in (1, 2, 3)]
+            d["proj"] = {"ex": e[0], "ey": e[1], "ez": e[2]}
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def glyph_parts(mob) -> dict | None:
+    """Each glyph's box (frame units) and the source characters it comes
+    from (Phase 5 step 6), for a Text / MathTex / Tex; None when the probe
+    doesn't match what the object draws."""
+    from .texmap import _svg_order, tex_map
+    try:
+        mp = tex_map(mob)
+    except Exception:  # noqa: BLE001  (a probe failure only loses the map)
+        return None
+    if mp is None:
+        return None
+    gl = _svg_order(mob) if mp["kind"] == "tex" else list(mob.family_members_with_points())
+    boxes = []
+    for x in gl:
+        lo, hi = x.get_corner(DL), x.get_corner(UR)
+        boxes.append([round(float(lo[0]), 4), round(float(lo[1]), 4),
+                      round(float(hi[0]), 4), round(float(hi[1]), 4)])
+    return {"kind": mp["kind"], "parts": mp["parts"], "map": mp["glyphs"], "boxes": boxes,
+            "colors": [_hex(x.get_color()) for x in gl]}
+
+
+def _coords(mob) -> dict | None:
+    """Axes / NumberPlane / NumberLine: where (0, 0) is and the scene vector of
+    one unit along each axis (Phase 5 step 7: drags in graph coordinates)."""
+    def xy(p):
+        return [round(float(p[0]), 5), round(float(p[1]), 5)]
+    try:
+        if hasattr(mob, "c2p") and hasattr(mob, "x_axis"):
+            o = np.array(mob.c2p(0, 0))[:2]
+            ex = np.array(mob.c2p(1, 0))[:2] - o
+            ey = np.array(mob.c2p(0, 1))[:2] - o
+            return {"o": xy(o), "ex": xy(ex), "ey": xy(ey)}
+        if hasattr(mob, "n2p") and hasattr(mob, "x_range"):
+            o = np.array(mob.n2p(0))[:2]
+            return {"o": xy(o), "ex": xy(np.array(mob.n2p(1))[:2] - o)}
+    except Exception:  # noqa: BLE001  (a log axis etc.: no linear map)
+        return None
+    return None
 
 
 def describe_object(mob, origin, how, parents=None) -> dict:
@@ -424,6 +636,19 @@ def describe_object(mob, origin, how, parents=None) -> dict:
         d["placement"] = placement(mob, parents or {})
     except Exception:
         pass
+    coords = _coords(mob)
+    if coords is not None:
+        d["coords"] = coords
+    ups = getattr(mob, "updaters", None) or []
+    if ups:
+        # where the updater is written, when it's in the project (not in Manim)
+        d["updaters"] = len(ups)
+        for u in ups:
+            fn = getattr(u, "__func__", u)
+            co = getattr(fn, "__code__", None)
+            if co is not None and "site-packages" not in co.co_filename.replace("\\", "/"):
+                d["updater_at"] = [co.co_filename.replace("\\", "/").rsplit("/", 1)[-1], co.co_firstlineno]
+                break
     if isinstance(mob, VMobject):
         # A group's own colour is a default nobody sees; report its first drawn part.
         shown = mob if mob.has_points() else next(
@@ -518,6 +743,9 @@ class Engine:
             if str(Path(fr.f_code.co_filename).resolve()).lower() == str(self.path).lower():
                 line = ln
         msg = f"{type(e).__name__}: {e}"
+        tex = _latex_detail(str(e))
+        if tex:
+            msg += f" [LaTeX: {tex}]"  # read now: Manim deletes the log after the next compile
         return EngineError(msg, line, "".join(traceback.format_exception(e))[-4000:])
 
     # -- one run of construct() ------------------------------------------------
@@ -751,6 +979,12 @@ class Cursor:
             times = np.arange(0, dur, step)
             n_frames = int(dur / step) if frozen else len(times)
             end = start + n_frames * step
+            ghosts = None  # worked out on the first frame asked for with ids, before begin moves anything
+            if not frozen:
+                try:
+                    ghosts = transform_ghosts(scene.animations) or None
+                except Exception:  # noqa: BLE001
+                    ghosts = None
             scene.begin_animations()
             stepping = not frozen and _has_time_updaters(scene)
             done = -1
@@ -789,7 +1023,7 @@ class Cursor:
                     clock += step
                 renderer.time = clock
                 try:
-                    got = capture(scene, ids)
+                    got = capture(scene, ids, ghosts)
                 except Exception as e:  # answer this request with the error; the cursor stays usable
                     got = e
                 self._reply(kind, got)
