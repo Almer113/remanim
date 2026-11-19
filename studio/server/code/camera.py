@@ -26,6 +26,38 @@ from .source import Source, Span
 from .splice import Edit, EditError, fmt, number_of, set_keyword, set_number
 
 ANGLES = ("phi", "theta", "gamma")
+# positional order of ThreeDScene.set_camera_orientation and move_camera (Manim CE 0.22)
+POSITIONAL = ("phi", "theta", "gamma", "zoom", "focal_distance", "frame_center")
+
+
+def _top_of(src: Source, fn) -> ast.stmt:
+    """The first statement of construct() (after a docstring), where a
+    camera placement goes. Refused when the body shares the def's line."""
+    body = fn.body
+    first = body[0]
+    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and len(body) > 1:
+        first = body[1]  # after a docstring
+    if first.lineno == fn.lineno or body[0].lineno == fn.lineno:
+        raise EditError(f"construct() is written on one line (line {fn.lineno}); "
+                        "put its body on its own line first")
+    return first
+
+
+def _repeat_confirm(src: Source, call, ev: dict | None = None) -> str | None:
+    """A camera call inside a loop or a helper runs more than once: say so."""
+    from .moves import function_of
+    from .planner import _loop_around
+    if ev is not None and ev.get("in_helper"):
+        return (f"the camera move is inside {ev.get('func')}(): "
+                "this changes it everywhere that helper is used")
+    fn = function_of(src, call)
+    if fn is not None and fn.name != "construct":
+        return f"the camera call is inside {fn.name}(): this changes it everywhere that function runs"
+    loop = _loop_around(src, call)
+    if loop is not None:
+        return (f"line {call.lineno} runs inside the loop at line {loop.lineno}: "
+                "this changes the camera on every pass of the loop")
+    return None
 
 
 def _chain(call) -> list[ast.Call]:
@@ -119,9 +151,7 @@ def plan_camera_2d(src: Source, scene: str, events: list, fps: float, timed: boo
             return _edit_chain(src, placed[-1], pos, width, cur, f"camera placement at line {placed[-1].lineno}")
         if t < 1e-6:
             # the first frame: place the camera before anything plays, no move
-            body = fn.body
-            first = body[1] if (isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
-                                and len(body) > 1) else body[0]
+            first = _top_of(src, fn)
             at = src.offset(first.lineno, 0)
             line = f"{src.indent_of(first.lineno)}self.camera.frame{chain}{src.newline}"
             return Plan([Edit(at, at, line)], f"camera placed: self.camera.frame{chain}", None,
@@ -133,7 +163,10 @@ def plan_camera_2d(src: Source, scene: str, events: list, fps: float, timed: boo
         return Plan(inserts._emit(src, sl, lines), f"camera move added at {start:.2f} s",
                     checks={"camera": True, "start": start, "run_time": 1.0})
     ev = before[-1]
-    return _edit_chain(src, _camera_play(src, ev), pos, width, cur, f"camera move at line {ev.get('call_line')}")
+    expr = _camera_play(src, ev)
+    plan = _edit_chain(src, expr, pos, width, cur, f"camera move at line {ev.get('call_line')}")
+    plan.confirm = _repeat_confirm(src, expr, ev)
+    return plan
 
 
 def _edit_chain(src: Source, expr, pos, width, cur, where: str):
@@ -228,10 +261,7 @@ def plan_camera_3d(src: Source, scene: str, events: list, t: float, values: dict
     # angle still comes from before); its end angles are what change
     usable = [x for x in times if (x[1] < t - 1e-6 if x[2] is not None else x[1] <= t + 1e-6)]
     if not usable:
-        body = fn.body
-        first = body[0]
-        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and len(body) > 1:
-            first = body[1]  # after a docstring
+        first = _top_of(src, fn)
         args = ", ".join(f"{k}={fmt(round(v, 2))} * DEGREES" if k in ANGLES else f"{k}={fmt(round(v, 3))}"
                          for k, v in want.items())
         at = src.offset(first.lineno, 0)
@@ -239,25 +269,37 @@ def plan_camera_3d(src: Source, scene: str, events: list, t: float, values: dict
         return Plan([Edit(at, at, line)], f"self.set_camera_orientation({args}) added", None,
                     checks={"camera": True})
     call, _, end = usable[-1]
-    edits = []
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+        raise EditError(f"the camera call at line {call.lineno} unpacks its arguments (* or **); "
+                        "change it in the code")
+    edits, missing = [], []
     for k, v in want.items():
         kw = Source.keyword(call, k)
-        if kw is not None:
+        node = kw.value if kw is not None else None
+        i = POSITIONAL.index(k)
+        if node is None and i < len(call.args):
+            node = call.args[i]  # set_camera_orientation(75 * DEGREES, -30 * DEGREES)
+        if node is not None:
             if k in ANGLES:
-                edits.append(_angle_text(src, kw.value, v))
+                edits.append(_angle_text(src, node, v))
             else:
-                if number_of(kw.value) is None:
-                    raise EditError(f"zoom is computed ({src.text(kw.value)}) at line {call.lineno}")
-                edits.append(set_number(src, kw.value, round(v, 3)))
+                if number_of(node) is None:
+                    raise EditError(f"zoom is computed ({src.text(node)}) at line {call.lineno}")
+                edits.append(set_number(src, node, round(v, 3)))
         else:
             text = f"{fmt(round(v, 2))} * DEGREES" if k in ANGLES else fmt(round(v, 3))
-            edits.append(set_keyword(src, call, k, text))
+            missing.append((k, text))
+    if missing:
+        # one insert for all of them: two at the same offset would run together
+        (k0, t0), rest = missing[0], missing[1:]
+        edits.append(set_keyword(src, call, k0, ", ".join([t0] + [f"{k}={t}" for k, t in rest])))
     edits.sort(key=lambda e: e.start)
     note = ", ".join(f"{k} {fmt(round(v, 2))}{'°' if k in ANGLES else ''}" for k, v in want.items())
     checks = {"camera": True}
     if end is not None and end > t:
         checks["verify_at"] = end  # the move is running at t: check where it ends
-    return Plan(edits, f"{call.func.attr}() at line {call.lineno}: {note}", None, checks=checks)
+    return Plan(edits, f"{call.func.attr}() at line {call.lineno}: {note}", _repeat_confirm(src, call),
+                checks=checks)
 
 
 def check(kind: str, got: dict | None, center=None, width=None, values=None) -> str | None:

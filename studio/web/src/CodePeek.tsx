@@ -59,7 +59,10 @@ export const CodePeek = memo(function CodePeek({ source, span, diff, file, liter
             title={l.scope === "constant" ? "A constant: click to change it everywhere it's used"
               : l.scope === "helper" ? "Inside a helper: click to change it for every use" : "Click to change"}
             onClick={() => setEditing(l)}
-            onKeyDown={(e) => { if (e.key === "Enter") setEditing(l); }}>{l.text}</span>);
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setEditing(l); }
+              if (e.key === "Delete" || e.key === "Backspace") e.stopPropagation();  // not "delete the object"
+            }}>{l.text}</span>);
       }
       at = b;
     }

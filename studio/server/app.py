@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hmac
 import re
 import json
 import threading
@@ -21,8 +22,13 @@ SKIP_DIRS = {".venv", "media", "node_modules", ".git", "studio/server", "studio/
              "__pycache__", ".claude"}
 HIDDEN_DIRS = {"studio/tests/tmp"}  # copies the tests make: openable, but not listed
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
-DEV_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}  # `npm run dev` (vite proxy)
+DEV_ORIGINS: set[str] = set()  # `--dev`: the vite dev server (`npm run dev`) on 5173 may call in
+VITE_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}
 TRUSTED_HOSTS: set[str] = set()  # opt-in extra names (`--allow-host`), e.g. a tailnet proxy; empty by default
+# a name other than localhost is reached by other machines: they need this token
+# (from the link printed at start-up, then a cookie); set by __main__ with --allow-host
+ACCESS_TOKEN = ""
+TOKEN_COOKIE = "studio_token"
 
 
 def _known_host(name: str) -> bool:
@@ -37,10 +43,13 @@ def _host_name(host: str) -> str:
 
 
 def _same_server(origin: str, host: str) -> bool:
-    """http://localhost:8770 and http://127.0.0.1:8770 are both this server."""
+    """http://localhost:8770 and http://127.0.0.1:8770 are both this server;
+    a trusted (tailnet) name only matches itself."""
     scheme, _, rest = origin.partition("://")
     port = lambda h: h.rsplit(":", 1)[1] if ":" in h and not h.endswith("]") else ""  # noqa: E731
-    return scheme in ("http", "https") and _known_host(_host_name(rest)) and port(rest) == port(host)
+    o, h = _host_name(rest), _host_name(host)
+    same = o == h or (o in LOCAL_HOSTS and h in LOCAL_HOSTS)
+    return scheme in ("http", "https") and same and port(rest) == port(host)
 
 
 @web.middleware
@@ -48,14 +57,30 @@ async def local_only(req: web.Request, handler):
     """Opening a file runs it and edits write code, so only this machine's
     own pages may talk to the server: the Host must be local (no DNS
     rebinding) and a browser's Origin must be this server."""
-    if not _known_host(_host_name(req.host or "")):
+    name = _host_name(req.host or "")
+    if not _known_host(name):
         raise web.HTTPForbidden(text="the studio only answers on localhost")
+    set_cookie = False
+    if name not in LOCAL_HOSTS:
+        # another machine (a tailnet name): only with the start-up link's token
+        given = req.cookies.get(TOKEN_COOKIE) or ""
+        if not (ACCESS_TOKEN and hmac.compare_digest(given, ACCESS_TOKEN)):
+            q = req.query.get("token", "")
+            if not (ACCESS_TOKEN and q and hmac.compare_digest(q, ACCESS_TOKEN)):
+                raise web.HTTPForbidden(text="open the link the studio printed when it started (it carries a token)")
+            set_cookie = True
     origin = req.headers.get("Origin")
     if origin is not None and origin not in DEV_ORIGINS and not _same_server(origin, req.host):
         raise web.HTTPForbidden(text="cross-origin requests are not allowed")
     # `<img src="http://127.0.0.1:8770/frame?...">` on another site sends no Origin
     if req.headers.get("Sec-Fetch-Site") == "cross-site" and origin not in DEV_ORIGINS:
         raise web.HTTPForbidden(text="cross-site requests are not allowed")
+    if set_cookie:
+        # drop the token from the address bar; the cookie carries it from here on
+        resp = web.HTTPFound(req.rel_url.with_query({k: v for k, v in req.query.items() if k != "token"}))
+        resp.set_cookie(TOKEN_COOKIE, ACCESS_TOKEN, httponly=True, secure=True, samesite="Strict",
+                        max_age=7 * 24 * 3600)
+        raise resp
     return await handler(req)
 
 

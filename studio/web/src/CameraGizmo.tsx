@@ -19,6 +19,8 @@ export function CameraGizmo({ cam, img, onCommit, onClose }: {
   const [zoom, setZoom] = useState(1);       // preview zoom factor (>1 closer)
   const idle = useRef<number | null>(null);
   const zoomRef = useRef(1);
+  const dragRef = useRef(drag);
+  dragRef.current = drag;
 
   // the preview: move/scale the frame image itself (2D only)
   const dx = drag ? drag.x - drag.x0 : 0, dy = drag ? drag.y - drag.y0 : 0;
@@ -29,6 +31,31 @@ export function CameraGizmo({ cam, img, onCommit, onClose }: {
     return () => { el.style.transform = ""; };
   }, [img, cam.kind, dx, dy, zoom]);
   useEffect(() => () => { if (idle.current) window.clearTimeout(idle.current); }, []);
+  // Esc closes camera mode (before App's Escape, which would clear the selection)
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); onClose(); }
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, [onClose]);
+  // a drag follows the mouse outside the canvas too, and is sent wherever it ends
+  const dragging = drag !== null;
+  useEffect(() => {
+    if (!dragging) return;
+    const move = (e: MouseEvent) => {
+      const r = size();
+      setDrag((d) => d && { ...d, x: e.clientX - r.left, y: e.clientY - r.top });
+    };
+    const up = () => {
+      const d = dragRef.current;
+      setDrag(null);
+      if (d && Math.hypot(d.x - d.x0, d.y - d.y0) > 2) commit(d.x - d.x0, d.y - d.y0, 1);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+  }, [dragging]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const size = () => layer.current!.getBoundingClientRect();
   const commit = (ddx: number, ddy: number, z: number) => {
@@ -52,14 +79,17 @@ export function CameraGizmo({ cam, img, onCommit, onClose }: {
   } : cam.kind === "3d" ? { theta: cam.theta, phi: cam.phi, zoom: cam.zoom * zoom } : null;
 
   return (
-    <div ref={layer} className="camera-layer" tabIndex={-1}
-      onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
-      onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); const r = size();
+    <div ref={layer} className="camera-layer"
+      onMouseDown={(e) => {
+        e.stopPropagation(); e.preventDefault();
+        if (idle.current) {
+          // a zoom is still waiting to be sent: send it now, the pan comes after its frame
+          window.clearTimeout(idle.current); idle.current = null;
+          const zz = zoomRef.current; zoomRef.current = 1; setZoom(1); commit(0, 0, zz);
+          return;
+        }
+        const r = size();
         setDrag({ x0: e.clientX - r.left, y0: e.clientY - r.top, x: e.clientX - r.left, y: e.clientY - r.top }); }}
-      onMouseMove={(e) => { if (!drag) return; const r = size(); setDrag({ ...drag, x: e.clientX - r.left, y: e.clientY - r.top }); }}
-      onMouseUp={() => { if (!drag) return; const d = drag; setDrag(null);
-        if (Math.hypot(d.x - d.x0, d.y - d.y0) > 2) commit(d.x - d.x0, d.y - d.y0, 1); }}
-      onMouseLeave={() => setDrag(null)}
       onDoubleClick={(e) => e.stopPropagation()}
       onWheel={(e) => {
         e.stopPropagation();

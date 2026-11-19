@@ -109,25 +109,40 @@ def plan_timing(src: Source, clip: dict, field_: str, value) -> Plan:
     return _confirm_loop(src, _call(src, clip["call"], name or "play"), plan)
 
 
-def loop_element(src: Source, call, name: ast.Name, k):
+# between a call and the loop that binds its time: passes and events stop lining up
+BETWEEN = (ast.For, ast.AsyncFor, ast.While, ast.If, ast.Try, ast.IfExp,
+           ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.comprehension)
+
+
+def loop_element(src: Source, call, name: ast.Name, k, target: float | None = None):
     """`for t, s in zip((5.5, 7.8), topics): self.at(t)`: on pass k, `t` is the
     k-th number of the literal it comes from. That number, and the loop; or
-    None when it isn't a literal or the pass can't be told (a loop inside a loop)."""
+    None when it isn't a literal or the pass can't be told.
+
+    The pass count `k` counts events, not passes: an `at()` already past its
+    time makes no event, and an `if` can skip one. So when `target` (the value
+    the name had on this pass) is known, the element is found by its value and
+    must be the only one with that value; `k` is used alone only when nothing
+    (if/try/inner loop) lies between the call and the loop."""
     if not isinstance(k, int) or k < 0:
         return None
     n = src.parent(call)
     loop = None
+    between = False  # a branch, try or inner loop between the call and the loop
     while n is not None and not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         if isinstance(n, (ast.For, ast.AsyncFor)) and loop is None and _binds(n.target, name.id):
             loop = n
         elif isinstance(n, (ast.For, ast.AsyncFor, ast.While, ast.comprehension)) and loop is not None:
             return None  # an outer loop runs this loop several times
+        elif loop is None and (isinstance(n, BETWEEN) or type(n).__name__ in ("TryStar", "Match")):
+            between = True
         n = src.parent(n)
-    if loop is None:
-        return None
+    if loop is None or between:
+        return None  # passes and events no longer line up one to one
     # the name must not be assigned again inside the loop
     for x in ast.walk(loop):
-        if x is not loop.target and isinstance(x, ast.Name) and x.id == name.id and isinstance(x.ctx, ast.Store)                 and not _inside(x, loop.target):
+        if x is not loop.target and isinstance(x, ast.Name) and x.id == name.id \
+                and isinstance(x.ctx, ast.Store) and not _inside(x, loop.target):
             return None
     it, tgt = loop.iter, loop.target
     seq, pos = None, None
@@ -144,13 +159,24 @@ def loop_element(src: Source, call, name: ast.Name, k):
             seq = it.args[p].elts
         elif it.func.id == "enumerate" and p == 1 and it.args and isinstance(it.args[0], (ast.List, ast.Tuple)):
             seq = it.args[0].elts
-    if seq is None or k >= len(seq) or any(isinstance(e, ast.Starred) for e in seq):
+    if seq is None or any(isinstance(e, ast.Starred) for e in seq):
         return None
-    el = seq[k]
-    if pos is not None:
-        if not isinstance(el, (ast.Tuple, ast.List)) or pos >= len(el.elts):
-            return None
-        el = el.elts[pos]
+    els = []
+    for e in seq:
+        if pos is not None:
+            if not isinstance(e, (ast.Tuple, ast.List)) or pos >= len(e.elts):
+                return None
+            e = e.elts[pos]
+        els.append(e)
+    if target is not None:
+        hits = [i for i, e in enumerate(els)
+                if number_of(e) is not None and abs(number_of(e) - target) < 1e-3]
+        if len(hits) != 1:
+            return None  # no element, or several, had this value
+        k = hits[0]
+    if k >= len(els):
+        return None
+    el = els[k]
     return (el, loop) if number_of(el) is not None else None
 
 
@@ -180,9 +206,15 @@ def _wait_duration(src, clip, name, value) -> Plan:
         new_t = round(clip["start"] + value, 2)  # an absolute time: keep it readable
         arg = call.args[0]
         if number_of(arg) is None and isinstance(arg, ast.Name):
-            found = loop_element(src, call, arg, clip.get("occurrence"))
+            target = None
+            if clip.get("start") is not None and clip.get("duration") is not None:
+                target = clip["start"] + clip["duration"]  # the time t had on this pass
+            found = loop_element(src, call, arg, clip.get("occurrence"), target)
             if found is not None:
                 node, loop = found
+                if fmt(new_t, src.text(node)) == src.text(node).lstrip("+"):
+                    raise EditError(f"pass {clip['occurrence'] + 1} already waits until "
+                                    f"{src.text(node)} s (the change rounds away)")
                 return Plan([set_number(src, node, new_t)],
                             f"pass {clip['occurrence'] + 1} of the loop at line {loop.lineno}: "
                             f"{src.text(node)} → {fmt(new_t, src.text(node))}",

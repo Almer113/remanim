@@ -54,7 +54,8 @@ def _renum(src: Source, node, value: float) -> Edit:
     # one must lose: whole numbers are far more common, so `2.0` comes back `2`
     whole_point = old.replace(".", "", 1).isdigit() and "." in old and float(old) == int(float(old))
     like = old if (v != int(v) or whole_point) else None
-    return Edit(a, b, fmt(v, like))
+    from .literals import number_text
+    return Edit(a, b, number_text(src, node, fmt(v, like)))
 
 
 def _dir_term(v: float, pos: str, neg: str) -> str:
@@ -251,6 +252,8 @@ def _parent_binop(root, node):
 # axes on screen while a drag is planned: name -> {"o", "ex", "ey"} (engine `coords`)
 COORDS: contextvars.ContextVar[dict] = contextvars.ContextVar("COORDS", default={})
 GRAPH_POINT = {"c2p": 2, "coords_to_point": 2, "n2p": 1, "number_to_point": 1}
+# classes whose first positional argument is the point they sit at
+POSITIONAL_POINT = {"Dot", "Dot3D"}
 
 
 def edit_graph_point(src: Source, expr, dx: float, dy: float) -> list[Edit] | None:
@@ -442,7 +445,11 @@ def plan_shift_on(src: Source, mv: dict, dx: float, dy: float) -> tuple[list, st
         return None
     name = Source.call_name(call)
     # 0. made at a point in graph coordinates: Dot(axes.c2p(1, 2))
-    pt = call.args[0] if call.args else (Source.keyword(call, "point").value if Source.keyword(call, "point") else None)
+    # Only a call whose first argument *is* where it sits: Line(c2p(..), c2p(..)),
+    # Polygon or Vector would be deformed by moving one of their points.
+    kw_pt = Source.keyword(call, "point")
+    pt = kw_pt.value if kw_pt is not None else (
+        call.args[0] if call.args and name in POSITIONAL_POINT else None)
     if pt is not None and mv.get("kind") not in ("animate",) and name not in ("shift", "move_to"):
         e = edit_graph_point(src, pt, dx, dy)
         if e is not None:

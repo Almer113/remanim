@@ -13,6 +13,7 @@ add_sound / add_subcaption / say / voiceover (narration.py, recording only).
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 import os
@@ -90,11 +91,11 @@ def install() -> OriginTracker:
     # Manim writes the Pango SVG straight to its cache path, and takes any file
     # there as finished: a cursor thread could read one another thread is still
     # writing (a ParseError, "no element found"). Text is made one at a time
-    # per process, and an empty file left by a killed process is cleared.
-    text_lock = threading.RLock()
+    # per process (the same lock as above: one lock, so no order to get wrong),
+    # and an empty file left by a killed process is cleared.
 
     def text_init(self, *a, use_svg_cache=True, **k):
-        with text_lock:
+        with lock:
             try:
                 orig_text(self, *a, use_svg_cache=use_svg_cache, **k)
             except Exception as e:  # noqa: BLE001
@@ -108,9 +109,15 @@ def install() -> OriginTracker:
     from manim.animation.transform_matching_parts import TransformMatchingAbstractBase
     orig_match = TransformMatchingAbstractBase.__init__
 
-    def match_init(self, mobject, target_mobject, *a, key_map=None, **k):
-        self._studio_key_map = dict(key_map or {})
-        orig_match(self, mobject, target_mobject, *a, key_map=key_map, **k)
+    def match_init(self, *a, **k):
+        # (mobject, target_mobject, transform_mismatches, fade_transform_mismatches, key_map, ...):
+        # read it where it was given, pass everything on untouched
+        km = k["key_map"] if "key_map" in k else (a[4] if len(a) > 4 else None)
+        try:
+            self._studio_key_map = dict(km or {})
+        except (TypeError, ValueError):
+            self._studio_key_map = {}
+        orig_match(self, *a, **k)
     TransformMatchingAbstractBase.__init__ = match_init
 
     try:  # narration length, decoded from the mp3 on every say()
@@ -128,6 +135,11 @@ def install() -> OriginTracker:
     _recorder = MoveRecorder(_tracker)
     narration.install(_tracker)
     return _tracker
+
+
+def _kept_counts():
+    """Objects made here for the studio's own use don't count towards ids."""
+    return _tracker.counts_kept() if _tracker is not None else contextlib.nullcontext()
 
 
 def _clear_empty_text_svgs() -> bool:
@@ -180,7 +192,7 @@ def _latex_detail(message: str) -> str | None:
             for x in lines[i + 1:i + 4]:
                 if x.startswith(("<argument>", "<recently read>")):
                     ctx = x.split(">", 1)[1]
-                    ctx = re.sub(r"\special\s*\{[^}]*\}?", "", ctx)
+                    ctx = re.sub(r"\\special\s*\{[^}]*\}?", "", ctx)
                     ctx = re.sub(r"^\s*\.\.\.", "", ctx)
                     ctx = re.sub(r"^[^{}]*'>\}", "", ctx).strip()
                     if ctx:
@@ -540,7 +552,8 @@ def _id_map(scene, glyphs_for: str | None = None):
     if glyphs_for is not None:
         for (m, _, _), d in zip(objects, described):
             if d.get("id") == glyphs_for:
-                g = glyph_parts(m)
+                with _kept_counts():
+                    g = glyph_parts(m)
                 if g is not None:
                     d["glyphs"] = g
                 break
@@ -979,10 +992,11 @@ class Cursor:
             times = np.arange(0, dur, step)
             n_frames = int(dur / step) if frozen else len(times)
             end = start + n_frames * step
-            ghosts = None  # worked out on the first frame asked for with ids, before begin moves anything
+            ghosts = None  # worked out for every play, before begin() moves anything
             if not frozen:
                 try:
-                    ghosts = transform_ghosts(scene.animations) or None
+                    with _kept_counts():
+                        ghosts = transform_ghosts(scene.animations) or None
                 except Exception:  # noqa: BLE001
                     ghosts = None
             scene.begin_animations()

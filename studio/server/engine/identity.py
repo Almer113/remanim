@@ -7,6 +7,7 @@ build objects at the same time), and object ids are strings for the wire.
 from __future__ import annotations
 
 import sys
+import contextlib
 import threading
 from collections import Counter
 from dataclasses import dataclass, field
@@ -109,6 +110,17 @@ class OriginTracker:
         if c is None:
             c = self._local.counts = Counter()
         return c
+
+    @contextlib.contextmanager
+    def counts_kept(self):
+        """Objects the studio itself makes while the scene runs (ghosts, glyph
+        probes) must not use up occurrence numbers: the next user object on the
+        same line keeps the id it has in every other run."""
+        saved = Counter(self.counts)
+        try:
+            yield
+        finally:
+            self._local.counts = saved
 
     def reset_counts(self):
         """Call at the start of every run of construct() (per thread)."""

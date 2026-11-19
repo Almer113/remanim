@@ -28,7 +28,11 @@ export function TextEditor({ obj, style, onDone }: {
   const firstEditable = parts.findIndex((p) => p.editable);
   return (
     <div className="text-editor" style={style}
-      onMouseDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => {
+        e.stopPropagation();
+        // a click on the header, a fixed part or a gap keeps the field focused (a blur would cancel)
+        if ((e.target as HTMLElement).tagName !== "TEXTAREA") e.preventDefault();
+      }}
       onBlur={(e) => {
         // leaving the editor (not moving between its fields) cancels
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) finish(false);

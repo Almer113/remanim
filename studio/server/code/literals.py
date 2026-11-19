@@ -23,6 +23,20 @@ from .splice import Edit, EditError, fmt, number_of
 NOT_VALUES = {"self", "True", "False", "None", "DEGREES", "PI", "TAU"}  # units, not choices
 
 
+def number_text(src: Source, node, text: str) -> str:
+    """`text` as it can replace `node`: a negative number that is the base
+    of `**` needs brackets (`-3 ** 2` is -(3 ** 2)), as it does after
+    `.` (`(-3).real`)."""
+    if not text.lstrip().startswith("-"):
+        return text
+    par = src.parent(node)
+    if isinstance(par, ast.BinOp) and isinstance(par.op, ast.Pow) and par.left is node:
+        return f"({text})"
+    if isinstance(par, ast.Attribute) and par.value is node:
+        return f"({text})"
+    return text
+
+
 def _is_docstring(body: list, s) -> bool:
     return (body and s is body[0] and isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)
             and isinstance(s.value.value, str))
@@ -162,7 +176,7 @@ def plan_literal(src: Source, census: Census, span, value: dict):
             raise EditError(f"not a number: {value['number']!r}") from None
         if not -float("inf") < n < float("inf"):
             raise EditError("not a finite number")
-        text = fmt(n, old)
+        text = number_text(src, node, fmt(n, old))
     elif "string" in value:
         if lit["kind"] != "string":
             raise EditError(f"{old} isn't a string")
@@ -180,7 +194,8 @@ def plan_literal(src: Source, census: Census, span, value: dict):
         raise EditError("that's the value already")
     a, b = src.span(node)
     confirm = None
-    if lit["scope"] == "helper":
+    if lit["scope"] == "helper" or lit["scope"] == "method" and not lit["where"].endswith(".construct"):
+        # a scene method other than construct() is a helper too: it may run many times
         confirm = f"line {lit['line']} is inside the helper {lit['where']}(): this changes every use of it"
     elif lit["scope"] == "constant":
         users = _uses(src, node)

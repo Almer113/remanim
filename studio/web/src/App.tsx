@@ -64,7 +64,15 @@ export function App() {
       }
     };
     conn.connect();
-    fetch("/api/files").then((r) => r.json()).then(setFiles).catch(() => {});
+    fetch("/api/files").then((r) => r.json()).then((list: { path: string; scenes: string[] }[]) => {
+      setFiles(list);
+      // the file remembered from last time may be gone (a deleted scratch file): start empty
+      if (fileRef.current && !list.some((x) => x.path === fileRef.current)) {
+        fileRef.current = "";
+        setFile("");
+        localStorageSet("studio.file", "");
+      }
+    }).catch(() => {});
     return conn.on((m) => {
       if (m.type === "model") {
         if (m.file === fileRef.current) setModel(m);  // other files' models are for other tabs
@@ -100,6 +108,7 @@ export function App() {
   const frameKey = model && scene ? `${model.session}|${model.rev}|${scene.name}|${f}` : "";
   const objects = objs.key === frameKey ? objs.list : [];
   const [camCanvas, setCamCanvas] = useState(false);
+  useEffect(() => { setCamCanvas(false); }, [file, scene?.name]);  // camera mode belongs to one scene
   // a 3D scene's first frame: where the scene before ends, for the continuity warning
   const [prevCam, setPrevCam] = useState<{ key: string; scene: string; cam: CameraState } | null>(null);
   const prevScene = model && scene ? model.scenes[model.scenes.findIndex((s) => s.name === scene.name) - 1] : undefined;
@@ -116,7 +125,8 @@ export function App() {
   }, [wantPrev, prevKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // the selected play() is under the playhead: show where its transforms go (step 8)
   const selClip = sel?.kind === "clip" && scene ? scene.clips[sel.clip] : null;
-  const ghosts: Ghost[] | null = selClip && objs.key === frameKey && objs.ghosts
+  // (not in 3D: the ghost boxes are world units, not what the tilted camera shows)
+  const ghosts: Ghost[] | null = selClip && objs.key === frameKey && objs.ghosts && objs.camera?.kind !== "3d"
     && selClip.start - 1e-6 <= f / fps && f / fps < selClip.start + selClip.duration
     ? objs.ghosts.filter((g) => sel?.kind !== "clip" || sel.anim === null || g.index === sel.anim) : null;
 
@@ -148,7 +158,8 @@ export function App() {
       gone = true;
       clearTimeout(t);
     };
-  }, [frameKey, rest, playing]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [frameKey, rest, playing, !!scene?.pending]); // eslint-disable-line react-hooks/exhaustive-deps
+  // (pending: a scene picked while it is still being traced gets its objects once the trace lands)
 
   // keep the selected object fresh after a reload (ids survive edits); an
   // object that isn't on screen at this frame stays selected but can't be edited
@@ -429,6 +440,11 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      // a focused clickable literal in the code peek takes its own Space/Enter
+      if ((e.key === " " || e.key === "Enter") && (e.target as HTMLElement)?.getAttribute?.("role") === "button") return;
+      // picking glyphs, editing text in place or moving the camera: their own keys only
+      // (each closes itself on Escape); Delete must not delete the object under them
+      if (partPick || textEdit || camCanvas) return;
       if (preview) {  // the confirm dialog is open: Escape cancels it, nothing else
         if (e.key === "Escape") cancelPreview();
         return;
@@ -464,7 +480,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup, partPick, textEdit, camCanvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the dialog takes the focus (not a button: a second Enter from the field
   // must not answer it unread); Tab reaches the buttons, Escape cancels
@@ -549,7 +565,8 @@ export function App() {
                 url={frameUrl(model.file, scene.name, model.rev, f, rest && !playing, session)}
                 idmapUrl={rest && !playing ? `/idmap?${query(model.file, scene.name, model.rev, f, session)}` : null}
                 width={model.width} height={model.height}
-                frameW={model.frame_width ?? 14.2222} frameH={model.frame_height ?? 8}
+                {...frameView(model, objs.key === frameKey ? objs.camera : null)}
+                onNote={(m) => toast("info", m)}
                 objects={rest && !playing ? objects : []}
                 selected={sel?.kind === "object" ? sel.obj.id : null}
                 others={others}
@@ -707,6 +724,13 @@ export function DiffView({ diff }: { diff: DiffHunk[] }) {
       ))}
     </div>
   );
+}
+
+/** What the canvas shows, in scene units: a 2D camera's frame where it has moved
+ * or zoomed (object boxes come in pixels; glyphs, ghosts and drags in scene units). */
+function frameView(model: { frame_width?: number; frame_height?: number }, cam: CameraState | null | undefined) {
+  if (cam?.kind === "2d") return { frameW: cam.width, frameH: cam.height, frameX: cam.center[0], frameY: cam.center[1] };
+  return { frameW: model.frame_width ?? 14.2222, frameH: model.frame_height ?? 8, frameX: 0, frameY: 0 };
 }
 
 function localStorageGet(k: string): string | null {

@@ -86,6 +86,12 @@ def rel(path: Path) -> str:
 
 
 
+def _timings(trace: dict) -> list:
+    """Every event's kind, start and length, to compare two replays."""
+    return [(e.get("kind"), round(e.get("start", 0), 3), round(e.get("duration", 0), 3))
+            for e in trace.get("events") or []]
+
+
 def _stop_reason(err: dict) -> str:
     """Why an edited scene was refused, with a hint for errors whose cause
     is in the scene rather than in the edit."""
@@ -657,7 +663,10 @@ class Document:
                     return {"type": "error", "message": f"unknown edit {msg['type']}"}
             except EditError as e:
                 return {"type": "edit.refused", "reason": str(e)}
-            new = apply(self.data, plan.edits)
+            try:
+                new = apply(self.data, plan.edits)
+            except EditError as e:  # overlapping edits from a planner: refuse, don't crash the request
+                return {"type": "edit.refused", "reason": str(e)}
             if plan.confirm:
                 token = hashlib.sha1(new).hexdigest()[:12]
                 self.pending[token] = Pending(token, scene, new, plan.note, plan.edits, plan.checks, target,
@@ -705,17 +714,12 @@ class Document:
             return {"type": "edit.refused", "reason": str(e)}
         want = value.get("string") if "string" in value else None
         reasons = []
+        asked = None  # the first checked candidate that needs a yes; one that doesn't wins
         for plan in plans:
             new = apply(self.data, plan.edits)
             if not Source(new).ok:
                 continue
-            target = {"kind": "part_colour"}
-            if plan.confirm:
-                token = hashlib.sha1(new).hexdigest()[:12]
-                self.pending[token] = Pending(token, scene, new, plan.note, plan.edits, plan.checks, target,
-                                              base=self.data)
-                return {"type": "edit.preview", "token": token, "summary": plan.note,
-                        "why": plan.confirm, "diff": self.diff(new)}
+            # every candidate is replayed and glyph-checked first, the ones that ask too
             req = {"op": "verify", "data": new, "scene": scene, "f": f, "glyphs": True,
                    "object": remap_id(obj.get("id"), self.data, plan.edits)}
             if "name" in value:
@@ -732,8 +736,18 @@ class Document:
             why = texplan.check(g.get("colors") or [], got, sel, hexes if isinstance(hexes, str) else None,
                                 _same_colour)
             if why is None:
-                return await self._write_verified(new, plan.note)
+                if not plan.confirm:
+                    return await self._write_verified(new, plan.note)
+                asked = asked or (plan, new)
+                continue
             reasons.append(f"{plan.note}: {why}")
+        if asked:
+            plan, new = asked
+            token = hashlib.sha1(new).hexdigest()[:12]
+            self.pending[token] = Pending(token, scene, new, plan.note, plan.edits, plan.checks,
+                                          {"kind": "part_colour"}, base=self.data, verified=True)
+            return {"type": "edit.preview", "token": token, "summary": plan.note,
+                    "why": plan.confirm, "diff": self.diff(new)}
         return {"type": "edit.refused",
                 "reason": "no edit coloured exactly those glyphs: " + "; ".join(reasons[:2] or ["nothing to try"])}
 
@@ -769,9 +783,9 @@ class Document:
                 values = {k: num(msg.get(k)) for k in ("phi", "theta", "gamma", "zoom")}
                 plan = cameraplan.plan_camera_3d(self.src, scene, tr["events"], t, values)
                 want = {"values": values}
+            new = apply(self.data, plan.edits)
         except (EditError, TypeError, ValueError) as e:
             return {"type": "edit.refused", "reason": str(e) if isinstance(e, EditError) else "bad request"}
-        new = apply(self.data, plan.edits)
         if not Source(new).ok:
             return {"type": "edit.refused", "reason": "the edit would not parse"}
         fv = f
@@ -787,6 +801,12 @@ class Document:
         why = cameraplan.check(cur["kind"], r.get("camera"), **want)
         if why:
             return {"type": "edit.refused", "reason": f"{plan.note}, but {why}"}
+        if getattr(plan, "confirm", None):  # e.g. a camera move in a loop: every pass changes
+            token = hashlib.sha1(new).hexdigest()[:12]
+            self.pending[token] = Pending(token, scene, new, plan.note, plan.edits, plan.checks,
+                                          {"kind": "camera"}, base=self.data, verified=True)
+            return {"type": "edit.preview", "token": token, "summary": plan.note,
+                    "why": plan.confirm, "diff": self.diff(new)}
         return await self._write_verified(new, plan.note)
 
     def _annotated(self, obj: dict) -> dict:
@@ -1163,7 +1183,14 @@ class Document:
                 if cleanup:
                     tidy = apply(new, cleanup)
                     if Source(tidy).ok:
-                        new, note = tidy, note + extra
+                        # the tidied file is replayed too: it must time out exactly as the edit did
+                        r2 = await self.worker.request({"op": "verify", "data": tidy, "scene": scene})
+                        after2 = r2.get("trace") if "error" not in r2 else None
+                        same = after2 is not None and not after2.get("error") \
+                            and _timings(after2) == _timings(after) \
+                            and not timeline.check(plan.checks, tr, after2, fps)
+                        if same:
+                            new, note = tidy, note + extra
             except EditError:
                 pass
         return await self._write_verified(new, note)

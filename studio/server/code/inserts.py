@@ -98,7 +98,8 @@ def scene_construct(src: Source, scene: str) -> ast.FunctionDef:
     cls = next((n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == scene), None)
     if cls is None:
         raise EditError(f"class {scene} isn't defined at the top of this file")
-    fn = next((n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "construct"), None)
+    # the last definition wins, as in Python
+    fn = next((n for n in reversed(cls.body) if isinstance(n, ast.FunctionDef) and n.name == "construct"), None)
     if fn is None:
         raise EditError(f"{scene} has no construct() of its own; add things in the class that defines it")
     return fn
@@ -341,9 +342,10 @@ def plan_preset(src: Source, scene: str, events: list, fps: float, timed: bool, 
     if preset not in PRESETS:
         raise EditError(f"{preset} isn't an animation preset")
     fn = scene_construct(src, scene)
-    expr = reference(src, obj, fn)
+    expr, bind = reference_at(src, obj, fn)
     rt = RUN_TIME.get(preset, 1.0)
     sl = slot(src, fn, events, t, fps, timed, rt)
+    check_bound(src, fn, expr, bind, sl.at)
     lines = _timeline_lines(sl, t, timed, fps, f"self.play({preset}({expr}), run_time={fmt(rt)})")
     start = _start(sl, t, timed)
     return Plan(_emit(src, sl, lines), f"{preset}({expr}) at {start:.2f} s{_pushed(sl, t, timed, fps, rt, events)}",
@@ -371,6 +373,33 @@ def reference_at(src: Source, obj: dict, fn) -> tuple[str, ast.stmt]:
     raise EditError("this object isn't stored in a variable in construct(); name it in the code first")
 
 
+def check_bound(src: Source, fn, expr: str, stmt, at: int) -> None:
+    """`expr` (bound by `stmt`) must still mean this object at byte `at`,
+    where new lines go: no new value for its name in between."""
+    root = re.sub(r"\[.*", "", expr)
+    if "." in root:
+        return  # self.x: an attribute (override_target checks its own)
+    _, bound = src.span(stmt)
+    if at < bound:
+        raise EditError(f"{root} is made at line {stmt.lineno}, after that time; drop it later")
+    for n in ast.walk(fn):
+        if n is stmt or not isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For,
+                                           ast.AsyncFor, ast.With, ast.NamedExpr)):
+            continue
+        if isinstance(n, ast.Assign):
+            tgts = n.targets
+        elif isinstance(n, (ast.With,)):
+            tgts = [i.optional_vars for i in n.items if i.optional_vars is not None]
+        else:
+            tgts = [n.target]
+        if not any(isinstance(t, ast.Name) and t.id == root for tg in tgts for t in ast.walk(tg)):
+            continue
+        a, _ = src.span(n)
+        if bound <= a < at:
+            raise EditError(f"{root} is given a new value at line {n.lineno}; "
+                            "it no longer means this object there")
+
+
 def _assigns(node, name: str) -> bool:
     return any(isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For)) and any(
         isinstance(t, ast.Name) and t.id == name
@@ -382,11 +411,12 @@ def _assigns(node, name: str) -> bool:
 def plan_duplicate(src: Source, scene: str, events: list, fps: float, timed: bool, obj: dict,
                    t: float, dx: float = 0.5, dy: float = -0.5) -> Plan:
     fn = scene_construct(src, scene)
-    expr = reference(src, obj, fn)
+    expr, bind = reference_at(src, obj, fn)
     base = re.sub(r"\[.*", "", expr)
     name = fresh_name(src, base)
     rt = RUN_TIME["FadeIn"]
     sl = slot(src, fn, events, t, fps, timed, rt)
+    check_bound(src, fn, expr, bind, sl.at)
     lines = [f"{name} = {expr}.copy().shift({delta_expr(dx, dy)})"] + \
         _timeline_lines(sl, t, timed, fps, f"self.play(FadeIn({name}), run_time={fmt(rt)})")
     start = _start(sl, t, timed)
@@ -715,11 +745,11 @@ def plan_composite(src: Source, scene: str, events: list, fps: float, timed: boo
     fn = scene_construct(src, scene)
     if which == "surface" and not _is_3d(src, scene, bases):
         raise EditError("the 3D surface needs a ThreeDScene; change the scene's base class first")
-    target = None
+    target = bind = None
     if which in ON_OBJECT:
         if not obj:
             raise EditError(f"drop the {which.replace('_', ' ')} on an object")
-        target = reference(src, obj, fn)
+        target, bind = reference_at(src, obj, fn)
     taken: set = set()
 
     def n(base):
@@ -739,6 +769,8 @@ def plan_composite(src: Source, scene: str, events: list, fps: float, timed: boo
             setup = ["self.set_camera_orientation(phi=65 * DEGREES, theta=-45 * DEGREES)"] + setup
             tilt = ", camera tilted"
     sl = slot(src, fn, events, t, fps, timed, rt)
+    if target is not None:
+        check_bound(src, fn, target, bind, sl.at)
     lines = setup + _timeline_lines(sl, t, timed, fps, plays[0]) + plays[1:]
     start = _start(sl, t, timed)
     label = which.replace("_", " ")

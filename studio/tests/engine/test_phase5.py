@@ -200,6 +200,9 @@ class Pair(Scene):
             assert r["type"] == "edit.refused" and "line 10 uses it" in r["reason"], r
             r = await doc.edit({"rev": doc.rev, "type": "edit.transform_kind", "scene": "Pair",
                                 "clip": clip["index"], "arg": 0, "kind": "TransformFromCopy"})
+            # a keeps its own shape now, so FadeOut(a) on line 10 fades something else: ask first
+            assert r["type"] == "edit.preview" and "line 10 uses it" in r["why"], r
+            r = await doc.confirm(r["token"])
             assert r["type"] == "edit.done", r
             assert "TransformFromCopy(a, b)" in path.read_text(encoding="utf-8")
             for _ in range(2):

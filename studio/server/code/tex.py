@@ -105,13 +105,15 @@ def candidates(src: Source, obj: dict, glyphs: dict, sel: list[int], colour: str
         literal = p < len(texts) and texts[p].get("editable")
         tex_all = " ".join(parts)
         if exact and literal and piece.strip() and tex_all.count(piece) == 1 and _balanced(piece) \
-                and not (name and _indexed(src, call, name[0])):
+                and cls != "SingleStringMathTex" and _isolation_safe(src, call, name):
             e = _add_to_map(src, call, "tex_to_color_map", piece, colour)
             if e is not None:
                 out.append(Plan([e], f"tex_to_color_map: {piece!r} → {colour}", confirm,
                                 checks={"part_colour": True}))
     if name:
-        head = f"[{p}]"  # a MathTex's submobjects are its parts, even with one part
+        # a MathTex's submobjects are its parts, even with one part; a
+        # SingleStringMathTex's are its glyphs
+        head = "" if cls == "SingleStringMathTex" else f"[{p}]"
         if whole:
             idx = head
         else:
@@ -164,6 +166,68 @@ def _indexed(src: Source, call, name: str) -> bool:
     return False
 
 
+# containers and helpers that keep a reference to the formula (indexing it later)
+CONTAINERS = {"VGroup", "Group", "VDict", "list", "tuple", "dict", "set", "zip", "enumerate",
+              "map", "filter", "sorted", "reversed", "iter", "next", "getattr", "setattr"}
+PART_ATTRS = {"submobjects", "family_members_with_points", "get_family", "split", "copy",
+              "deepcopy", "get_part_by_tex", "get_parts_by_tex", "index_of_part",
+              "index_of_part_by_tex", "tex_strings", "add", "remove", "submobject"}
+SAFE_METHODS = {"add", "play", "remove", "bring_to_front", "bring_to_back", "add_foreground_mobject",
+                "add_foreground_mobjects", "add_fixed_in_frame_mobjects", "next_to", "move_to",
+                "align_to", "match_width", "match_height", "match_x", "match_y", "wait"}
+
+
+def _isolation_safe(src: Source, call, name_stmt) -> bool:
+    """Isolating a piece renumbers the formula's parts. Safe only when the
+    formula is a plain local name and no code can reach its parts: every use
+    is the bare name handed to an animation or scene method, or a method
+    called on it; never indexed, aliased, put in a group or stored on self."""
+    from .moves import function_of
+    if name_stmt is None:
+        # no name: safe only when the formula goes straight into an animation
+        # or scene method (self.play(Write(MathTex(...))))
+        return _use_safe(src, call)
+    name, stmt = name_stmt
+    if _indexed(src, call, name):
+        return False
+    fn = function_of(src, call)
+    if fn is None:
+        return False
+    for n in ast.walk(fn):
+        if not (isinstance(n, ast.Name) and n.id == name) or isinstance(n.ctx, ast.Store):
+            continue
+        if not isinstance(n.ctx, ast.Load) or not _use_safe(src, n):
+            return False
+    return True
+
+
+def _use_safe(src: Source, node) -> bool:
+    top = node
+    while True:
+        par = src.parent(top)
+        if isinstance(par, ast.Attribute) and par.value is top:
+            if par.attr in PART_ATTRS or par.attr.startswith("_"):
+                return False
+            top = par
+        elif isinstance(par, ast.Call) and par.func is top and top is not node:
+            top = par
+        else:
+            break
+    par = src.parent(top)
+    if isinstance(par, ast.Expr) and isinstance(top, ast.Call):
+        return True  # eq.shift(UP)
+    if isinstance(par, ast.keyword):
+        par = src.parent(par)
+    if isinstance(par, ast.Call) and top is not par.func \
+            and any(top is a for a in list(par.args) + [k.value for k in par.keywords]):
+        f = par.func
+        if isinstance(f, ast.Name):
+            return f.id not in CONTAINERS and f.id not in MATCHERS and f.id[:1].isupper()
+        if isinstance(f, ast.Attribute):
+            return f.attr in SAFE_METHODS
+    return False
+
+
 def _balanced(t: str) -> bool:
     depth, i = 0, 0
     while i < len(t):
@@ -199,7 +263,27 @@ def _add_to_map(src: Source, call, kw: str, key: str, colour: str) -> Edit | Non
             a, b = src.span(d.values[d.keys.index(x)])
             return Edit(a, b, colour)
     a, b = src.span(d)
-    return Edit(b - 1, b - 1, (", " if d.keys else "") + entry)
+    if not d.keys:
+        return Edit(b - 1, b - 1, entry)
+    last = d.values[-1]
+    _, e = src.span(last)
+    tail = src.data[e:b - 1].decode("utf-8")  # after the last entry: `,`, spaces, newlines
+    if "#" in tail:
+        return None
+    k0 = d.keys[-1]
+    if d.lineno != k0.lineno:
+        # black style, one entry per line: a new line at the entries' indent
+        if src.before(k0.lineno, k0.col_offset).strip():
+            return None  # entries share lines: no clear place
+        indent = src.indent_of(k0.lineno)
+        if "," in tail:
+            at = e + tail.index(",") + 1
+            return Edit(at, at, "\n" + indent + entry + ",")
+        return Edit(e, e, ",\n" + indent + entry)
+    if "," in tail:  # {"a": RED,}
+        at = e + tail.index(",") + 1
+        return Edit(at, at, " " + entry + ",")
+    return Edit(e, e, ", " + entry)
 
 
 def check(before: list, after_glyphs: dict | None, sel: list[int], want: str | None, same) -> str | None:

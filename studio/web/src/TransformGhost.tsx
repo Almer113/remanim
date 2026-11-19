@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Ghost } from "./types";
 
 // one colour per matched pair; source and target share it
@@ -10,15 +10,28 @@ type Box = [number, number, number, number];
  * TransformMatchingTex each matched part on both sides in one colour.
  * Unmatched parts are grey; click one on each side to match them
  * ("match these" writes key_map=). Drawn over the frame inside the play. */
-export function TransformGhost({ ghosts, frameW, frameH, onMatch }: {
+export function TransformGhost({ ghosts, frameW, frameH, frameX = 0, frameY = 0, onMatch }: {
   ghosts: Ghost[];
   frameW: number;
   frameH: number;
+  frameX?: number;
+  frameY?: number;
   onMatch: ((index: number, sourceKey: string, targetKey: string) => void) | null;
 }) {
-  const [pick, setPick] = useState<{ index: number; key: string } | null>(null);
+  const [picked, setPick] = useState<{ index: number; key: string } | null>(null);
+  // a half-made match only lasts while its part is still there unmatched (frames and edits move on)
+  const pick = picked && ghosts.some((g) => g.index === picked.index
+    && g.unmatched_source?.some((u) => u.key === picked.key)) ? picked : null;
+  useEffect(() => {
+    if (!pick) return;
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); setPick(null); }
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, [pick?.index, pick?.key]); // eslint-disable-line react-hooks/exhaustive-deps
   const pct = (b: Box, pad = 0.04): React.CSSProperties => ({
-    left: `${((b[0] - pad) / frameW + 0.5) * 100}%`, top: `${(0.5 - (b[3] + pad) / frameH) * 100}%`,
+    left: `${((b[0] - pad - frameX) / frameW + 0.5) * 100}%`, top: `${(0.5 - (b[3] + pad - frameY) / frameH) * 100}%`,
     width: `${((b[2] - b[0] + 2 * pad) / frameW) * 100}%`, height: `${((b[3] - b[1] + 2 * pad) / frameH) * 100}%`,
   });
   return (

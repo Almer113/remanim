@@ -13,8 +13,10 @@ interface Props {
   idmapUrl: string | null;
   width: number;
   height: number;
-  frameW: number;   // scene units
+  frameW: number;   // scene units: what the camera shows (a 2D camera's frame, if it moved)
   frameH: number;
+  frameX?: number;  // the frame's centre, scene units
+  frameY?: number;
   objects: Obj[];
   selected: string | null;
   others: string[];   // shift-click multi-selection
@@ -36,6 +38,8 @@ interface Props {
   onMatch?: ((index: number, sourceKey: string, targetKey: string) => void) | null;
   /** Camera mode: drags and the wheel move the camera instead of objects. */
   camera?: { cam: CameraState; onCommit: (m: object) => void; onClose: () => void } | null;
+  /** Why a gesture did nothing (shown as a toast). */
+  onNote?: (msg: string) => void;
 }
 
 type Drag = {
@@ -61,6 +65,7 @@ const SNAP_PX = 7;    // snapping distance on screen
  * and canvas gestures that become code edits on release. */
 export function Canvas(p: Props) {
   const { url, idmapUrl, width, height, frameW, frameH, objects, selected, others, editable, stale } = p;
+  const frameX = p.frameX ?? 0, frameY = p.frameY ?? 0;
   const [shown, setShown] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [slow, setSlow] = useState(false);
@@ -129,7 +134,7 @@ export function Canvas(p: Props) {
     return [((e.clientX - r.left) / r.width) * width, ((e.clientY - r.top) / r.height) * height];
   };
   const pxPerUnit = width / frameW;
-  const toUnits = (x: number, y: number): [number, number] => [(x / width - 0.5) * frameW, (0.5 - y / height) * frameH];
+  const toUnits = (x: number, y: number): [number, number] => [frameX + (x / width - 0.5) * frameW, frameY + (0.5 - y / height) * frameH];
   const screenScale = () => {
     const r = wrap.current?.getBoundingClientRect();
     return r && r.width ? width / r.width : 1;  // canvas px per screen px
@@ -211,7 +216,8 @@ export function Canvas(p: Props) {
     for (const [hx, hy] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) {
       if (!onIt && Math.abs(x - hx) <= tol && Math.abs(y - hy) <= tol) return "scale";
     }
-    if (Math.hypot(x - (x0 + x1) / 2, y - (y0 - ROT_GAP * screenScale())) <= tol + 2) return "rotate";
+    // (3D objects: a turn on screen isn't a turn about OUT under a tilted camera; no handle)
+    if (!sel.proj && Math.hypot(x - (x0 + x1) / 2, y - (y0 - ROT_GAP * screenScale())) <= tol + 2) return "rotate";
     return null;
   };
 
@@ -335,7 +341,10 @@ export function Canvas(p: Props) {
       if (o.box) {
         const cx = (o.box[0] + o.box[2]) / 2, cy = (o.box[1] + o.box[3]) / 2;
         ctx.save();
-        ctx.translate(cx + g.dx * pxPerUnit, cy - g.dy * pxPerUnit);
+        // 3D: the world move seen through the camera; 2D: the move itself
+        const [sx, sy] = o.proj && g.kind === "move"
+          ? [g.dx * o.proj.ex[0] + g.dy * o.proj.ey[0], g.dx * o.proj.ex[1] + g.dy * o.proj.ey[1]] : [g.dx, g.dy];
+        ctx.translate(cx + sx * pxPerUnit, cy - sy * pxPerUnit);
         ctx.rotate((-g.deg * Math.PI) / 180);
         ctx.scale(g.k, g.k);
         if (active.ghost && at) ctx.drawImage(active.ghost, at[0] - cx, at[1] - cy, at[2], at[3]);
@@ -348,8 +357,8 @@ export function Canvas(p: Props) {
         ctx.strokeStyle = "rgba(255, 90, 160, 0.9)";
         ctx.lineWidth = 1 * s;
         ctx.setLineDash([]);
-        if (g.gx !== null) { const X = (g.gx / frameW + 0.5) * width; ctx.beginPath(); ctx.moveTo(X, 0); ctx.lineTo(X, height); ctx.stroke(); }
-        if (g.gy !== null) { const Y = (0.5 - g.gy / frameH) * height; ctx.beginPath(); ctx.moveTo(0, Y); ctx.lineTo(width, Y); ctx.stroke(); }
+        if (g.gx !== null) { const X = ((g.gx - frameX) / frameW + 0.5) * width; ctx.beginPath(); ctx.moveTo(X, 0); ctx.lineTo(X, height); ctx.stroke(); }
+        if (g.gy !== null) { const Y = (0.5 - (g.gy - frameY) / frameH) * height; ctx.beginPath(); ctx.moveTo(0, Y); ctx.lineTo(width, Y); ctx.stroke(); }
         // readout
         const label = g.kind === "move" ? `Δx ${g.dx.toFixed(2)}  Δy ${g.dy.toFixed(2)}`
           : g.kind === "scale" ? `× ${g.k.toFixed(2)}` : `${g.deg.toFixed(0)}°`;
@@ -384,8 +393,10 @@ export function Canvas(p: Props) {
             ctx.strokeRect(hx - h, hy - h, 2 * h, 2 * h);
           }
           const mx = (x0 + x1) / 2;
+          if (!sel.proj) {
           ctx.beginPath(); ctx.moveTo(mx, y0 - 2.5 * s); ctx.lineTo(mx, y0 - ROT_GAP * s + h); ctx.stroke();
           ctx.beginPath(); ctx.arc(mx, y0 - ROT_GAP * s, h, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+          }
         }
       }
     }
@@ -467,6 +478,13 @@ export function Canvas(p: Props) {
       if (d.url !== url || !editable) return;
       // what was drawn is what is sent: the modifiers of the last move or key
       const g = solve(d);
+      if (d.kind === "move" && d.obj.proj) {
+        const [a, b] = d.obj.proj.ex, [c, dd] = d.obj.proj.ey;
+        if (Math.abs(a * dd - b * c) < 0.05) {
+          p.onNote?.("This camera sees the floor edge-on, so a drag can't tell where on it you mean: tilt the camera, or move it in the code");
+          return;
+        }
+      }
       const nothing = g.kind === "move" ? Math.abs(g.dx) < 1e-3 && Math.abs(g.dy) < 1e-3
         : g.kind === "scale" ? Math.abs(g.k - 1) < 1e-3 : Math.abs(g.deg) < 0.01;
       if (nothing) return;
@@ -563,11 +581,11 @@ export function Canvas(p: Props) {
       {p.camera && !p.partPick && !p.textEdit && (
         <CameraGizmo cam={p.camera.cam} img={img} onCommit={p.camera.onCommit} onClose={p.camera.onClose} />
       )}
-      {p.ghosts && p.ghosts.length > 0 && !drag && !p.partPick && !p.textEdit && (
-        <TransformGhost ghosts={p.ghosts} frameW={frameW} frameH={frameH} onMatch={p.onMatch ?? null} />
+      {p.ghosts && p.ghosts.length > 0 && !drag?.started && !p.partPick && !p.textEdit && (
+        <TransformGhost ghosts={p.ghosts} frameW={frameW} frameH={frameH} frameX={frameX} frameY={frameY} onMatch={p.onMatch ?? null} />
       )}
       {p.partPick && p.glyphUrl && p.onPartDone && (
-        <GlyphPicker key={p.glyphUrl} obj={p.partPick} url={p.glyphUrl} frameW={frameW} frameH={frameH} onDone={p.onPartDone} />
+        <GlyphPicker key={p.glyphUrl} obj={p.partPick} url={p.glyphUrl} frameW={frameW} frameH={frameH} frameX={frameX} frameY={frameY} onDone={p.onPartDone} />
       )}
       {hover && !drag && <div className="hover-tag">{hover.name ?? hover.class}{hover.tier === 3 ? " 🔒" : ""}</div>}
       {failed ? <div className="frame-msg">⚠ This frame didn't render: {failed}</div>

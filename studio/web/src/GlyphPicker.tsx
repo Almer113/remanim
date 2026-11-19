@@ -8,11 +8,13 @@ export const COLORS = ["FG", "MUTED", "ACCENT", "GOOD", "BAD", "WHITE", "BLUE", 
  * (Phase 5 step 6). The engine's map says which source characters made
  * each glyph; the server writes the colour and checks it by replay.
  * Click or drag across glyphs; Esc cancels. */
-export function GlyphPicker({ obj, url, frameW, frameH, onDone }: {
+export function GlyphPicker({ obj, url, frameW, frameH, frameX = 0, frameY = 0, onDone }: {
   obj: Obj;
   url: string;
   frameW: number;
   frameH: number;
+  frameX?: number;
+  frameY?: number;
   onDone: (pick: { glyphs: number[]; colour: string } | null) => void;
 }) {
   const [g, setG] = useState<Glyphs | null | undefined>(undefined);
@@ -20,12 +22,14 @@ export function GlyphPicker({ obj, url, frameW, frameH, onDone }: {
   const dragging = useRef<null | boolean>(null);   // adding (true) or removing (false)
   useEffect(() => {
     let live = true;
-    fetch(url).then((r) => r.json()).then((r) => { if (live) setG(r.glyphs ?? null); })
+    // 410: the file changed under the picker (an undo, an edit elsewhere): close quietly
+    fetch(url).then((r) => (r.status === 410 ? undefined : r.ok ? r.json() : null))
+      .then((r) => { if (!live) return; if (r === undefined) onDone(null); else setG(r?.glyphs ?? null); })
       .catch(() => { if (live) setG(null); });
     return () => { live = false; };
   }, [url]);
   useEffect(() => {
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); onDone(null); } };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); onDone(null); } };
     const up = () => { dragging.current = null; };
     window.addEventListener("keydown", key, true);
     window.addEventListener("mouseup", up);
@@ -41,7 +45,7 @@ export function GlyphPicker({ obj, url, frameW, frameH, onDone }: {
     return n;
   });
   const pct = (b: number[]) => ({
-    left: `${(b[0] / frameW + 0.5) * 100}%`, top: `${(0.5 - b[3] / frameH) * 100}%`,
+    left: `${((b[0] - frameX) / frameW + 0.5) * 100}%`, top: `${(0.5 - (b[3] - frameY) / frameH) * 100}%`,
     width: `${((b[2] - b[0]) / frameW) * 100}%`, height: `${((b[3] - b[1]) / frameH) * 100}%`,
   });
   const sourceOf = () => {
@@ -58,7 +62,7 @@ export function GlyphPicker({ obj, url, frameW, frameH, onDone }: {
     Math.max(acc[2], b[2]), Math.max(acc[3], b[3])], [Infinity, Infinity, -Infinity, -Infinity]);
 
   return (
-    <div className="glyph-layer" onMouseDown={(e) => { e.stopPropagation(); if (e.target === e.currentTarget) onDone(null); }}
+    <div className="glyph-layer" onMouseDown={(e) => { e.stopPropagation(); if (e.target === e.currentTarget && !picked.size) onDone(null); }}
       onDoubleClick={(e) => e.stopPropagation()}>
       {g === undefined && <div className="glyph-msg">Matching {obj.name ?? obj.class}'s glyphs to its source… (a formula's first time takes a LaTeX run)</div>}
       {g === null && <div className="glyph-msg">The studio can't match this text's glyphs to its source; colour it in the code. <button onClick={() => onDone(null)}>Close</button></div>}
@@ -69,7 +73,7 @@ export function GlyphPicker({ obj, url, frameW, frameH, onDone }: {
           onMouseEnter={() => { if (dragging.current !== null) setPiece(i, dragging.current); }} />
       ))}
       {g && box && (
-        <div className="glyph-bar" style={{ left: `${(box[0] / frameW + 0.5) * 100}%`, top: `${(0.5 - box[1] / frameH) * 100}%` }}
+        <div className="glyph-bar" style={{ left: `${((box[0] - frameX) / frameW + 0.5) * 100}%`, top: `${(0.5 - (box[1] - frameY) / frameH) * 100}%` }}
           onMouseDown={(e) => e.stopPropagation()}>
           <div className="gb-head">{picked.size ? <>Colour <code>{sourceOf()}</code></> : "Click or drag across glyphs"}</div>
           <div className="gb-swatches">

@@ -84,14 +84,14 @@ def test_why_stuck_names_the_animation():
 from studio.server.code.planner import plan_timing  # noqa: E402
 
 
-def at_clip(code, occurrence, start):
+def at_clip(code, occurrence, start, duration=0.5):
     return {"kind": "wait", "call": at_span(code, "self.at(t)"), "call_name": "at", "start": start,
-            "duration": 0.5, "occurrence": occurrence, "in_helper": False}
+            "duration": duration, "occurrence": occurrence, "in_helper": False}
 
 
 def test_at_time_from_a_zipped_literal():
     code = scene("for t, s in zip((5.5, 7.8, 9.8), topics):", "    self.at(t)", "    self.play(FadeIn(s))")
-    plan = plan_timing(Source(code.encode()), at_clip(code, 1, 7.0), "duration", 1.0)
+    plan = plan_timing(Source(code.encode()), at_clip(code, 1, 7.0, 0.8), "duration", 1.0)
     out = apply(code.encode(), plan.edits).decode()
     assert "zip((5.5, 8.0, 9.8), topics)" in out and "pass 2 of the loop" in plan.note
     assert plan.confirm is None  # one pass only: nothing else changes
@@ -99,7 +99,7 @@ def test_at_time_from_a_zipped_literal():
 
 def test_at_time_from_a_tuple_of_tuples():
     code = scene('for t, mode in ((4.6, "happy"), (7.4, "sad")):', "    self.at(t)")
-    plan = plan_timing(Source(code.encode()), at_clip(code, 0, 4.0), "duration", 0.8)
+    plan = plan_timing(Source(code.encode()), at_clip(code, 0, 4.0, 0.6), "duration", 0.8)
     assert "((4.8, \"happy\"), (7.4, \"sad\"))" in apply(code.encode(), plan.edits).decode()
 
 

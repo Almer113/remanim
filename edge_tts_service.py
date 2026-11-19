@@ -52,13 +52,28 @@ class EdgeTTSService(SpeechService):
         # meet the same new line at once. cache.json is read-modify-written, so
         # the whole lookup-or-synthesise runs under a lock file in the cache
         # folder: the second process waits, then finds the first one's entry.
+        # A hit is looked up first without the lock, so lines already spoken
+        # never wait behind another process's synthesis.
+        hit = self._cached_line(text, kwargs, quiet=True)
+        if hit is not None:
+            return hit
         with _cache_lock(Path(self.cache_dir)):
-            if kwargs.get("path") is None and self.global_speed == 1:
-                norm = " ".join(text.split())  # as the base class does
-                cached = self.get_cached_result(self._input_data(norm), self.cache_dir)
-                if cached is not None and "final_audio" in cached:
-                    return cached
+            hit = self._cached_line(text, kwargs)
+            if hit is not None:
+                return hit
             return super()._wrap_generate_from_text(text, **kwargs)
+
+    def _cached_line(self, text: str, kwargs: dict, quiet: bool = False):
+        if kwargs.get("path") is not None or self.global_speed != 1:
+            return None
+        norm = " ".join(text.split())  # as the base class does
+        try:
+            cached = self.get_cached_result(self._input_data(norm), self.cache_dir)
+        except Exception:  # noqa: BLE001  (unlocked: cache.json may be mid-write)
+            if not quiet:
+                raise
+            return None
+        return cached if cached is not None and "final_audio" in cached else None
 
     def generate_from_text(self, text: str, cache_dir=None, path=None, **kwargs) -> dict:
         cache_dir = Path(cache_dir or self.cache_dir)

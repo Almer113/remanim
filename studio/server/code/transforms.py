@@ -50,10 +50,11 @@ def _later_uses(src: Source, call: ast.Call, name: str) -> list[int]:
     stmt = statement_of(src, call)
     if fn is None or stmt is None:
         return []
-    names = sorted((n.lineno, n.col_offset, isinstance(n.ctx, ast.Store)) for n in ast.walk(fn)
+    # on one line, reads come before the binding (`a = a.copy()` reads the old a)
+    names = sorted((n.lineno, isinstance(n.ctx, ast.Store), n.col_offset) for n in ast.walk(fn)
                    if isinstance(n, ast.Name) and n.id == name and n.lineno > stmt.end_lineno)
     lines = []
-    for line, _, store in names:
+    for line, store, _ in names:
         if store:
             break  # bound again: later uses are another object
         lines.append(line)
@@ -68,17 +69,36 @@ def plan_kind(src: Source, play_span, index: int, kind: str):
     old = call.func.id
     if old == kind:
         raise EditError(f"it is a {kind} already")
+    from .planner import _loop_around
     gone = ON_SCREEN[old] - ON_SCREEN[kind]
+    warn = []
     for i in sorted(gone):
         arg = call.args[i]
         if not isinstance(arg, ast.Name):
+            warn.append(f"{src.text(arg)} is no longer on screen afterwards, and the studio can't "
+                        "tell whether later code uses it")
             continue
         uses = _later_uses(src, call, arg.id)
         if uses:
             raise EditError(f"after {kind}({src.text(call.args[0])}, {src.text(call.args[1])}), "
                             f"{arg.id} is no longer on screen, but line {uses[0]} uses it")
+    if (old == "Transform") != (kind == "Transform"):
+        # only Transform reshapes its source in place: a later use of it sees another shape
+        a0 = call.args[0]
+        shape = "keeps its own shape" if old == "Transform" else f"takes the shape of {src.text(call.args[1])}"
+        if not isinstance(a0, ast.Name):
+            warn.append(f"{src.text(a0)} now {shape}; check the code that uses it later")
+        else:
+            uses = _later_uses(src, call, a0.id)
+            if uses:
+                warn.append(f"{a0.id} now {shape}, and line {uses[0]} uses it")
+    loop = _loop_around(src, call)
+    if loop is not None:
+        warn.append(f"line {call.lineno} runs inside the loop at line {loop.lineno}: every pass changes, "
+                    "and the next pass may use what this one leaves on screen")
     a, b = src.span(call.func)
-    return Plan([Edit(a, b, kind)], f"{old} → {kind} (line {call.lineno})", None, checks={"kind": kind})
+    return Plan([Edit(a, b, kind)], f"{old} → {kind} (line {call.lineno})", "; ".join(warn) or None,
+                checks={"kind": kind})
 
 
 def pair(src: Source, play_span, index: int) -> dict | None:

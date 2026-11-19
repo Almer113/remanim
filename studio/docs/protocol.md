@@ -40,7 +40,13 @@ simpler shape. Where they differ, this list is what the code does.
   client pairs `edit.*` replies. `model` and `file.changed` are pushed.
 - **Local only** (review after Phase 2): every request needs a local `Host`
   (`127.0.0.1`, `localhost`, `[::1]`), and a browser `Origin` must be this
-  server under either local name, or the Vite dev server on 5173. Values
+  server under either local name (or the Vite dev server on 5173, only with
+  `--dev`). **Other machines** (review after Phase 5): `--allow-host NAME`
+  adds a name (a `tailscale serve` proxy); requests under it need the
+  random token from the link printed at start-up (`/?token=…`), which the
+  server moves into an HttpOnly cookie and drops from the URL. A browser
+  `Origin` must be the request's own host. Never point `tailscale funnel`
+  at the studio. Values
   written as code (`rate_func`, `{"name"}`) must be Python names; property
   names must be identifiers.
 - **`session`** in every `model` changes with each server run; the client
