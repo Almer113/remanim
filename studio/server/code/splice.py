@@ -9,6 +9,8 @@ from pathlib import Path
 
 from .source import Source
 
+MAX_LINE = 100  # code_spec §6
+
 
 @dataclass(frozen=True)
 class Edit:
@@ -121,7 +123,25 @@ def set_keyword(src: Source, call: ast.Call, name: str, value: str | None) -> Ed
     last = max(args, key=lambda n: (n.end_lineno, n.end_col_offset))
     _, at = src.span(last)
     if call.lineno == call.end_lineno:
-        return Edit(at, at, f", {name}={value}")
+        line = src.line_text(call.lineno)
+        if len(line) + len(f", {name}={value}") <= MAX_LINE:
+            return Edit(at, at, f", {name}={value}")
+        # too long for one line (code_spec §4.3): continue under the opening paren
+        paren = src.offset(call.func.end_lineno, call.func.end_col_offset)
+        col = len(src.data[src.line_starts[call.lineno - 1]:paren].decode("utf-8")) + 1
+        nl = src.newline
+        # nested in a call that goes on after it (`play(F(a), G(b))`): the
+        # rest moves to its own line under that call's paren too
+        outer = _enclosing_call(src, call)
+        end = src.offset(call.end_lineno, call.end_col_offset)
+        rest = src.data[end:src.line_end(call.lineno)]
+        if outer is not None and outer.lineno == call.lineno and rest.startswith(b", ") \
+                and rest[2:].strip(b"\r\n"):
+            o_paren = src.offset(outer.func.end_lineno, outer.func.end_col_offset)
+            o_col = len(src.data[src.line_starts[call.lineno - 1]:o_paren].decode("utf-8")) + 1
+            close = src.data[at:end].decode("utf-8")
+            return Edit(at, end + 2, f",{nl}{' ' * col}{name}={value}{close},{nl}{' ' * o_col}")
+        return Edit(at, at, f",{nl}{' ' * col}{name}={value}")
     # multi-line call: one argument per line? then add a line in that style
     if last.lineno > call.lineno and _one_per_line(call, args):
         indent = src.indent_of(last.lineno)
@@ -137,6 +157,15 @@ def set_keyword(src: Source, call: ast.Call, name: str, value: str | None) -> Ed
             return Edit(line_end, line_end, f"{indent}{name}={value},{nl}")
         return Edit(at, at, f",{nl}{indent}{name}={value}")
     return Edit(at, at, f", {name}={value}")
+
+
+def _enclosing_call(src: Source, call: ast.Call):
+    """The call that has `call` as one of its arguments, if any."""
+    for node in ast.walk(src.tree):
+        if isinstance(node, ast.Call) and (any(a is call for a in node.args) or
+                                           any(k.value is call for k in node.keywords)):
+            return node
+    return None
 
 
 def _one_per_line(call, args) -> bool:

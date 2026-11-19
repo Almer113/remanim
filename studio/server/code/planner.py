@@ -161,15 +161,36 @@ def _play_runtime(src, clip, value) -> Plan:
 
 
 def _anim_runtime(src, clip, value) -> Plan:
+    from .timeline import _runtime_edits, clip_parts
     call = _call(src, clip["call"], "play")
-    if Source.keyword(call, "run_time") is not None:
-        raise EditError("play() sets run_time for all its animations "
-                        f"(line {call.lineno}); per-clip timing inside it comes in Phase 4")
     anims = _anim_args(call)
     i = clip.get("anim_index", -1)
     if anims is None or not 0 <= i < len(anims):
         raise EditError("can't tell which argument of play() this animation is")
+    play_rt = Source.keyword(call, "run_time")
+    if play_rt is not None:
+        # play(run_time=R) times every animation: give each its own R, this one the new value
+        rt = number_of(play_rt.value)
+        if rt is None:
+            raise EditError(f"play() sets a computed run_time for all its animations (line {call.lineno})")
+        if len(anims) == 1:
+            return Plan([set_number(src, play_rt.value, value)],
+                        f"run_time={src.text(play_rt.value)} → {fmt(value, src.text(play_rt.value))}",
+                        checks={"duration": value})
+        edits = [set_keyword(src, call, "run_time", None)]
+        for j, a in enumerate(anims):
+            edits += _runtime_edits(src, a, value if j == i else rt)
+        return Plan(edits, f"run_time={fmt(rt)} moved from play() onto each animation; this one {fmt(value)}",
+                    checks={"duration": value})
     expr = anims[i]
+    inner_, _, length, cc = clip_parts(expr)
+    if cc is not None:
+        if length is not None:
+            _literal_or_refuse(src, length, "the clip's length")
+            return Plan([set_number(src, length, value)], f"length={src.text(length)} → {fmt(value, src.text(length))}",
+                        checks={"duration": value})
+        return Plan([set_keyword(src, cc, "length", fmt(value))], f"length={fmt(value)} added to clip()",
+                    checks={"duration": value})
     inner = _anim_call(expr)
     if inner is not None:
         k = Source.keyword(inner, "run_time")
@@ -201,6 +222,34 @@ def _anim_runtime(src, clip, value) -> Plan:
     raise EditError(f"can't set run_time on {src.text(expr)[:40]}")
 
 
+# rate functions that `from manim import *` gives by bare name; the rest
+# (ease_in_sine, ease_out_back, ...) are only reachable as rate_functions.<name>
+STAR_RATES = {"smooth", "linear", "rush_into", "rush_from", "slow_into", "double_smooth",
+              "there_and_back", "there_and_back_with_pause", "wiggle", "running_start",
+              "not_quite_there", "squish_rate_func", "lingering", "exponential_decay",
+              "smoothererstep", "smootherstep", "smoothstep"}
+
+
+def _module_names(src) -> set[str]:
+    """Names the file binds at module level (imports, defs, assignments)."""
+    out = set()
+    for node in src.tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            out |= {(a.asname or a.name).split(".")[0] for a in node.names}
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.Assign):
+            out |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return out
+
+
+def _rate_expr(src, name: str) -> str:
+    """How the file should spell rate function `name`."""
+    if "." in name or name in STAR_RATES or name in _module_names(src):
+        return name
+    return f"rate_functions.{name}"
+
+
 def _rate_func(src, clip, value) -> Plan:
     call = _call(src, clip["call"], "play")
     default = clip.get("default_rate_func")
@@ -208,19 +257,22 @@ def _rate_func(src, clip, value) -> Plan:
     if clip["kind"] == "anim":
         anims = _anim_args(call)
         i = clip.get("anim_index", -1)
-        if anims is None or not 0 <= i < len(anims) or _anim_call(anims[i]) is None:
+        from .timeline import clip_parts
+        expr = clip_parts(anims[i])[0] if anims is not None and 0 <= i < len(anims) else None
+        if expr is None or _anim_call(expr) is None:
             raise EditError("easing for this animation can't be set separately yet")
         if Source.keyword(call, "rate_func") is not None:
             raise EditError("play() sets rate_func for all its animations")
-        target = _anim_call(anims[i])
+        target = _anim_call(expr)
     kw = Source.keyword(target, "rate_func")
     if value == default:
         if kw is None:
             raise EditError(f"already {value}")
         return Plan([set_keyword(src, target, "rate_func", None)], f"rate_func removed (default {value})",
                     checks={"rate_func": value})
-    return Plan([set_keyword(src, target, "rate_func", value)], f"rate_func={value}",
-                checks={"rate_func": value})
+    code = _rate_expr(src, value)
+    return Plan([set_keyword(src, target, "rate_func", code)], f"rate_func={code}",
+                checks={"rate_func": value.rsplit(".", 1)[-1]})
 
 
 def _anim_args(call: ast.Call):

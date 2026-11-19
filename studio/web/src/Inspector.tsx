@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import type { Model, SceneModel } from "./types";
 import type { Selection } from "./App";
+import { EasingPicker } from "./Easing";
 
-const RATE_FUNCS = ["smooth", "linear", "rush_into", "rush_from", "there_and_back", "double_smooth",
-  "ease_in_sine", "ease_out_sine", "ease_in_out_sine", "ease_in_out_cubic", "ease_out_back", "wiggle"];
 const COLORS = ["FG", "MUTED", "ACCENT", "GOOD", "BAD", "WHITE", "BLUE", "TEAL", "GREEN", "YELLOW", "GOLD",
   "RED", "MAROON", "PURPLE", "PINK", "ORANGE", "GREY"];
 
@@ -108,12 +107,12 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
         {c.kind === "play" && (
           <div className="row">
             <label>Easing</label>
-            <select value={rate ?? ""} disabled={!!locked || busy}
-              onChange={(e) => edit("rate_func", e.target.value || (a ? a.default_rate_func : c.anims[0]?.default_rate_func) || "smooth")}>
-              {!rate && <option value="">(default)</option>}
-              {[...new Set([...(rate ? [rate] : []), ...RATE_FUNCS])].map((r) => <option key={r} value={r}>{r}</option>)}
-            </select>
+            <EasingPicker value={rate} fallback={a ? a.default_rate_func : c.anims[0]?.default_rate_func ?? null}
+              disabled={!!locked || busy} onPick={(name) => edit("rate_func", name)} />
           </div>
+        )}
+        {a && (a.offset ?? 0) > 0 && (
+          <div className="row"><label>Starts in group</label><span className="mono">+{(a.offset ?? 0).toFixed(2)} s</span></div>
         )}
         <div className="btns-row"><button disabled={!!locked || busy} onClick={actions.remove}
           title="Delete (Del)">Delete {sel.anim !== null ? "this animation" : c.kind === "wait" ? "pause" : "clip"}</button></div>

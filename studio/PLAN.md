@@ -11,6 +11,7 @@ Status: Phase 0 done (go). Phase 1 done: wireframes and code specification
 approved 2026-11-18. Phase 2 done 2026-11-18: exit criteria met
 (`docs/phase2/exit_report.md`). Phase 3 done 2026-11-18: exit criteria met
 (`docs/phase3/exit_report.md`), reviewed in `docs/review_phase3.md`. Phase 4
+done 2026-11-19: exit criterion met (`docs/phase4/exit_report.md`). Phase 5
 is next.
 
 ## 1. Decisions already made
@@ -223,6 +224,11 @@ editor. Narration track with text-to-speech, audio tracks with waveform,
 captions. Sections and markers.
 
 **Exit:** `order_matters.py` can be re-cut and re-narrated entirely in the GUI.
+
+**Status (2026-11-19): done.** Plan in `docs/phase4/plan.md`, results in
+`docs/phase4/exit_report.md`. The re-cut renders and passes `audio_check.py`.
+Open: `ClippedGrid` with a constant part count (needs a `manim_kit.py`
+change) and removing no-op `at()` anchors.
 
 ### Phase 5. Coverage (XL)
 

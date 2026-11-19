@@ -100,6 +100,50 @@ user looked at.
 - Files under `studio/tests/tmp/` (test copies) open by name but are not
   in `/api/files`.
 
+## Added in Phase 4 (the full timeline)
+
+Same envelope and replies as Phase 3. Times are seconds in the scene;
+`play` is an index into the scene's `play()` calls (`Clip.play_index`),
+`clip` an index into `clips`, `line` into `voice`, `section` into
+`sections`.
+
+```jsonc
+{"type": "edit.voice", "action": "text",    "line": 0, "value": "New words."}  // re-synthesised by the replay
+{"type": "edit.voice", "action": "caption", "line": 0, "value": "a²"}          // null: remove caption=
+{"type": "edit.voice", "action": "move",    "line": 0, "t": 1.5}               // its at()
+{"type": "edit.voice", "action": "add",     "t": 5.0, "value": "Words."}       // self.line("...")
+{"type": "edit.voice", "action": "delete",  "line": 0}                         // the with body stays, dedented
+{"type": "edit.shift",  "plays": [0, 2], "lines": [1], "dt": 0.3, "ripple": true}
+{"type": "edit.offset", "clip": 4, "anim": 1, "start": 0.4}     // clip(anim, start=) inside its group
+{"type": "edit.merge",  "clip": 4, "anim": 0, "into": 2, "start": 0.5}  // joins an earlier play(), start into it
+{"type": "edit.split",  "clip": 4, "anim": 1, "t": 3.2}         // its own play() at t
+{"type": "edit.reorder", "play": 3, "target": 1, "after": false}
+{"type": "edit.scene_order", "order": ["Question", "Takeaway", "..."]}  // SCENES = [...]
+{"type": "edit.section", "action": "add",    "t": 0, "name": "Opening"}
+{"type": "edit.section", "action": "rename", "section": 0, "name": "Intro"}
+{"type": "edit.section", "action": "delete", "section": 0}
+```
+
+- `edit.timing` with `field: "rate_func"` writes a bare name when `from
+  manim import *` provides it (smooth, linear, there_and_back, ...) and
+  `rate_functions.<name>` otherwise (the `ease_*` family).
+- A replay that fails to synthesise new words (no network, Edge TTS down)
+  refuses the edit with that reason; the file is not changed.
+- `edit.reorder` is refused when the two statements touch the same names
+  the file assigns (both change `blob`, say). In a `TimedScene` the two
+  statements swap and the `at()` anchors stay.
+- `edit.done` summaries end with knock-on notes ("3 clips now start 0.30 s
+  later", "scene is now 7.80 s").
+- The scene model gains `timed`, `voice` (lines: text, caption, start,
+  duration, hold, line, lock, movable, warnings, bookmarks), `captions`,
+  `burned_captions`, `sounds` and `sections`; anims carry `offset`.
+
+HTTP:
+- `GET /audio?file=&scene=&rev=` → the scene's narration and sounds mixed
+  into one mono 24 kHz WAV, as long as the scene. Cached per revision.
+- `GET /audio/peaks?file=&scene=&rev=` → `[{start, duration, file, peaks}]`,
+  50 peak values per second for each sound.
+
 ## HTTP
 
 | Method & path | Returns |

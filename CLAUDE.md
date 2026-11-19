@@ -83,7 +83,9 @@ pane, not VS Code.
     Fade it in or out only while the tracker is still.
   - Helpers: `chain_matrices(step, ...)` (a step is a matrix, or `turn(θ)`
     for a real rotation), `lerp_matrix`, `rotation`, `bmatrix`,
-    `video_icon`, `clip_rect`, `clip_ellipse`.
+    `video_icon`, `clip_rect`, `clip_ellipse`, and `clip(anim, start=,
+    length=)` (an animation that starts `start` s into its `play()`; the
+    studio writes it for overlapping clips).
   It changes no global config. Smoke test: `tools/fixtures/kit_parts.py`
   (`Parts`, `KitTiming`).
   Use it in new videos; never import `eola_common.py` there. Example videos:

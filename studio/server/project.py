@@ -19,6 +19,7 @@ from pathlib import Path
 from .code import inserts
 from .code import moves as moveplan
 from .code import planner
+from .code import timeline
 from .code.census import classify, summary
 from .code.source import Source, Span
 from .code.splice import Edit, EditError, apply, write_atomic
@@ -77,6 +78,18 @@ class FrameCache:
 def rel(path: Path) -> str:
     return path.resolve().relative_to(ROOT).as_posix()
 
+
+
+def _stop_reason(err: dict) -> str:
+    """Why an edited scene was refused, with a hint for errors whose cause
+    is in the scene rather than in the edit."""
+    m = err.get("message", "")
+    why = f"the edited scene stops with {m}" + (f" (line {err['line']})" if err.get("line") else "")
+    if "zip()" in m and "families_zipped" in (err.get("traceback") or ""):
+        why += (". An object changed its number of parts while an animation ran, most often a "
+                "FadeIn/FadeOut of an always_redraw object (a ClippedGrid) that is still moving; "
+                "the edit only changed the timing it happens at. Fade it while it is still")
+    return why
 
 class Document:
     def __init__(self, path: Path, api: list[str], notify):
@@ -279,6 +292,7 @@ class Document:
 
     def _scene_model(self, tr: dict) -> dict:
         clips, rows = [], OrderedDict()
+        n_play = 0
         for i, ev in enumerate(tr["events"]):
             call = self.src.find_call(Span(*ev["call"])) if ev.get("call") and self.src.ok else None
             name = Source.call_name(call) if call is not None else None
@@ -302,6 +316,9 @@ class Document:
                     "text": self.src.text(call)[:200] if call is not None else None}
             if name == "play" and call is not None and Source.keyword(call, "run_time") is not None:
                 clip["play_runtime"] = True
+            if ev["kind"] == "play":
+                clip["play_index"] = n_play
+                n_play += 1
             clips.append(clip)
             if ev["kind"] == "play":
                 for a in ev["anims"]:
@@ -313,9 +330,47 @@ class Document:
                     rows[key]["clips"].append({"clip": i, "anim": a["index"]})
         for key, row in rows.items():
             row["label"] = self._label(row["chain"]) or self._object_label(row["id"], row["class"])
+        timed = "TimedScene" in (tr.get("bases") or [])
         return {"name": tr["name"], "duration": tr["duration"], "error": tr.get("error"),
                 "bases": tr.get("bases", []), "target": tr.get("target"), "clips": clips,
-                "rows": list(rows.values()), "frames": self.frame_count(tr["name"])}
+                "rows": list(rows.values()), "frames": self.frame_count(tr["name"]), "timed": timed,
+                **self._audio_model(tr, timed)}
+
+    def _audio_model(self, tr: dict, timed: bool) -> dict:
+        """Narration lines, captions and other sounds, with what can be edited."""
+        a = tr.get("audio") or {}
+        voice = []
+        for ln in a.get("lines", []):
+            lock = None
+            call = None
+            if self.src.ok:
+                try:
+                    call, _ = timeline._line_call(self.src, tr["name"], ln)
+                except EditError as e:
+                    lock = str(e)
+            shown = ln.get("caption") or ln["text"]
+            voice.append({"index": ln["index"], "kind": ln["kind"], "text": ln["text"], "caption": ln.get("caption"),
+                          "start": ln["start"], "requested": ln["requested"], "duration": ln.get("duration", 0.0),
+                          "hold": ln.get("hold", 0.0), "block_end": ln.get("block_end"),
+                          "bookmarks": ln.get("bookmarks") or [],
+                          "line": call.lineno if call is not None else (ln["call"][0] if ln.get("call") else None),
+                          "lock": lock, "movable": lock is None and timed and ln["kind"] == "say",
+                          "warnings": timeline.caption_warnings(shown, ln.get("hold"))})
+        line_files = {ln.get("audio") for ln in a.get("lines", [])}
+        sounds = []
+        for snd in a.get("sounds", []):
+            if snd.get("line") is not None or snd["file"] in line_files:
+                continue
+            f = Path(snd["file"])
+            try:
+                name = rel(f)
+            except ValueError:
+                name = f.name
+            sounds.append({"file": name, "start": snd["start"], "line": snd["call"][0] if snd.get("call") else None})
+        sections = [{"index": i, "name": x["name"], "start": x["start"],
+                     "line": x["call"][0] if x.get("call") else None} for i, x in enumerate(a.get("sections", []))]
+        return {"voice": voice, "captions": a.get("captions", []), "burned_captions": a.get("burned", False),
+                "sounds": sounds, "sections": sections}
 
     def _label(self, chain: list) -> str | None:
         """The variable an object ends up in: `title = get_title()` names
@@ -354,6 +409,10 @@ class Document:
                 return {"type": "edit.refused", "reason": "the file doesn't parse; fix it first"}
             scene = msg.get("scene")
             tr = self.traces.get(scene)
+            if tr is None and msg["type"] == "edit.scene_order":
+                # the SCENES list belongs to no scene: verify against any traced one
+                scene = next((n for n, t in self.traces.items() if not t.get("error")), None)
+                tr = self.traces.get(scene) if scene else None
             if tr is None:
                 return {"type": "edit.refused", "reason": "that scene is still being traced; try again in a moment"}
             if tr.get("error"):
@@ -381,6 +440,8 @@ class Document:
                     return await self._transform(scene, tr, msg)
                 elif msg["type"] in STRUCTURAL:
                     return await self._structural(scene, tr, msg)
+                elif msg["type"] in TIMELINE:
+                    return await self._timeline(scene, tr, msg)
                 elif msg["type"] == "edit.prop":
                     obj = msg["object"]
                     plan = planner.plan_property(self.src, obj, msg["prop"], msg["value"])
@@ -606,7 +667,7 @@ class Document:
         if "error" in r:
             return {"type": "edit.refused", "reason": f"the edited scene doesn't run: {r['error']['message']}"}
         if r["trace"].get("error"):
-            return {"type": "edit.refused", "reason": f"the edited scene stops with {r['trace']['error']['message']}"}
+            return {"type": "edit.refused", "reason": _stop_reason(r['trace']['error'])}
         objs = r.get("objects") or []
         why = None
         if kind in ("edit.insert", "edit.duplicate", "edit.group"):
@@ -631,6 +692,120 @@ class Document:
         if why:
             return {"type": "edit.refused", "reason": why}
         return await self._write_verified(new, plan.note)
+
+    # -- timeline edits: narration, moving groups and clips (Phase 4) ----------------------
+    async def _timeline(self, scene: str, tr: dict, msg: dict) -> dict:
+        fps = self.meta.get("fps", 15)
+        timed = "TimedScene" in (tr.get("bases") or [])
+        events = tr["events"]
+        lines = (tr.get("audio") or {}).get("lines", [])
+        src = self.src
+        kind = msg["type"]
+
+        def num(v, what):
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                raise EditError(f"not a {what}: {v!r}") from None
+            if not math.isfinite(x):
+                raise EditError(f"not a {what}")
+            return x
+
+        def line_at(i):
+            if not isinstance(i, int) or not 0 <= i < len(lines):
+                raise EditError("that narration line no longer exists")
+            return lines[i]
+        try:
+            if kind == "edit.voice":
+                act = msg.get("action")
+                if act == "text":
+                    plan = timeline.plan_voice_text(src, scene, line_at(msg.get("line")), msg.get("value"))
+                elif act == "caption":
+                    plan = timeline.plan_voice_caption(src, scene, line_at(msg.get("line")), msg.get("value"))
+                elif act == "move":
+                    plan = timeline.plan_voice_move(src, scene, line_at(msg.get("line")), events, lines,
+                                                    num(msg.get("t"), "time"), fps, timed)
+                elif act == "add":
+                    plan = timeline.plan_voice_add(src, scene, events, fps, timed, num(msg.get("t"), "time"),
+                                                   msg.get("value"))
+                elif act == "delete":
+                    plan = timeline.plan_voice_delete(src, scene, line_at(msg.get("line")))
+                else:
+                    raise EditError(f"unknown narration edit {act!r}")
+            elif kind == "edit.shift":
+                plays = list(msg.get("plays") or [])
+                voices = list(msg.get("lines") or [])
+                plan = timeline.plan_shift(src, scene, events, lines, plays, voices, num(msg.get("dt"), "time"),
+                                           fps, timed, bool(msg.get("ripple", True)))
+            elif kind == "edit.offset":
+                clips = self._scene_model(tr)["clips"]
+                i = msg.get("clip")
+                if not isinstance(i, int) or not 0 <= i < len(clips) or clips[i]["kind"] != "play":
+                    raise EditError("that clip no longer exists")
+                anim = msg.get("anim")
+                if not isinstance(anim, int):
+                    raise EditError("no animation given")
+                plan = timeline.plan_anim_offset(src, clips[i], anim, num(msg.get("start"), "time"), fps)
+            elif kind == "edit.section":
+                secs = (tr.get("audio") or {}).get("sections", [])
+                act = msg.get("action")
+                if act == "add":
+                    plan = timeline.plan_section_add(src, scene, events, fps, timed, num(msg.get("t"), "time"),
+                                                     msg.get("name"))
+                else:
+                    i = msg.get("section")
+                    if not isinstance(i, int) or not 0 <= i < len(secs):
+                        raise EditError("that section no longer exists")
+                    if act == "rename":
+                        plan = timeline.plan_section_rename(src, scene, secs[i], msg.get("name"))
+                    elif act == "delete":
+                        plan = timeline.plan_section_delete(src, scene, secs[i])
+                    else:
+                        raise EditError(f"unknown section edit {act!r}")
+            elif kind == "edit.reorder":
+                plan = timeline.plan_reorder(src, scene, events, msg.get("play"), msg.get("target"),
+                                             bool(msg.get("after")), timed)
+            elif kind == "edit.scene_order":
+                plan = timeline.plan_scene_order(src, msg.get("order"), list(self.meta.get("scenes", [])))
+            elif kind in ("edit.merge", "edit.split"):
+                clips = self._scene_model(tr)["clips"]
+
+                def play_clip(i):
+                    if not isinstance(i, int) or not 0 <= i < len(clips) or clips[i]["kind"] != "play":
+                        raise EditError("that clip no longer exists")
+                    return clips[i]
+                anim = msg.get("anim")
+                if anim is not None and not isinstance(anim, int):
+                    raise EditError("bad animation index")
+                if kind == "edit.merge":
+                    plan = timeline.plan_merge(src, scene, play_clip(msg.get("clip")), anim,
+                                               play_clip(msg.get("into")), num(msg.get("start"), "time"), fps)
+                else:
+                    if anim is None:
+                        raise EditError("no animation given")
+                    plan = timeline.plan_split(src, scene, play_clip(msg.get("clip")), anim,
+                                               num(msg.get("t"), "time"), events, fps, timed)
+            else:
+                raise EditError(f"unknown edit {kind}")
+        except EditError as e:
+            return {"type": "edit.refused", "reason": str(e)}
+        new = apply(self.data, plan.edits)
+        if not Source(new).ok:
+            return {"type": "edit.refused", "reason": "the edit would not parse"}
+        r = await self.worker.request({"op": "verify", "data": new, "scene": scene})
+        if "error" in r:
+            return {"type": "edit.refused", "reason": f"the edited scene doesn't run: {r['error']['message']}"}
+        after = r["trace"]
+        if after.get("error"):
+            m = after["error"]["message"]
+            if "speech" in m.lower() or "edge" in m.lower() or "synthes" in m.lower():
+                return {"type": "edit.refused", "reason": f"text-to-speech failed (no network?): {m}"}
+            return {"type": "edit.refused", "reason": _stop_reason(after["error"])}
+        why = timeline.check(plan.checks, tr, after, fps)
+        if why:
+            return {"type": "edit.refused", "reason": why}
+        note = plan.note + timeline.knock_on(tr, after, fps, set(plan.checks.get("starts", {}).get("plays", {})))
+        return await self._write_verified(new, note)
 
     def _animating(self, tr: dict, obj: dict, f: int) -> str | None:
         """Canvas edits are offered at still moments only (S2 gap 5)."""
@@ -660,7 +835,7 @@ class Document:
     def _check(self, target: dict, r: dict) -> str | None:
         tr = r["trace"]
         if tr.get("error"):
-            return f"the edited scene stops with {tr['error']['message']}"
+            return _stop_reason(tr['error'])
         fps = self.meta.get("fps", 15)
         if target["kind"] == "timing":
             evs = tr["events"]
@@ -774,6 +949,8 @@ class Document:
 
 
 STRUCTURAL = ("edit.insert", "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip")
+TIMELINE = ("edit.voice", "edit.shift", "edit.offset", "edit.merge", "edit.split", "edit.reorder",
+            "edit.scene_order", "edit.section")
 
 
 def _line_of_assignment(new: bytes, name: str, edits: list) -> int | None:

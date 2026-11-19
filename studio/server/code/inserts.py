@@ -221,6 +221,10 @@ def slot(src: Source, fn, events: list, t: float, fps: float, timed: bool, run_t
             body, block_start = st.body, a   # t is inside the with block: look inside
             continue
         if timed and _is_self_stmt(st, "at"):
+            e = max(x for _, x, _ in times[id(st)])
+            if abs(e - t) < frame / 2:
+                # `self.at(t)` itself (its end only rounds past t): go after it
+                return Slot([], src.line_end(st.end_lineno), src.indent_of(st.lineno), e, at_needed=False)
             # `self.at(3)` waiting through t: the new self.at(t) goes before it
             return _before(src, body, j, prev_end, timed, t)
         # t is inside a play() or something else that runs: start right after it
@@ -240,10 +244,15 @@ def _remove_stmt_edit(src: Source, st) -> Edit | None:
 
 def _before(src, body, j, prev_end, timed, t) -> Slot:
     st = body[j]
+    # the statements before already bring the scene to t (`self.at(t)` just
+    # above, a play() ending at t): another self.at(t) would do nothing
+    there = timed and abs(prev_end - t) < 0.005
     if j == 0:
-        return Slot([], src.line_starts[st.lineno - 1], src.indent_of(st.lineno), t if timed else prev_end)
+        return Slot([], src.line_starts[st.lineno - 1], src.indent_of(st.lineno), t if timed else prev_end,
+                    at_needed=not there)
     prev = body[j - 1]
-    return Slot([], src.line_end(prev.end_lineno), src.indent_of(prev.lineno), t if timed else prev_end)
+    return Slot([], src.line_end(prev.end_lineno), src.indent_of(prev.lineno), t if timed else prev_end,
+                at_needed=not there)
 
 
 def _start(sl: Slot, t: float, timed: bool) -> float:

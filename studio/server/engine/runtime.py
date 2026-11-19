@@ -7,7 +7,8 @@ This module, identity.py and moves.py are the only places that touch Manim
 internals (architecture.md §3): CairoRenderer.play, Mobject.__init__/copy,
 Text's SVG cache flag, the __init__ of file-backed mobjects, an audio-length
 memo (here and in identity.py), and the Mobject move/scale/rotate methods,
-Mobject.add and Transform.begin (moves.py, recording only).
+Mobject.add and Transform.begin (moves.py, recording only), and
+add_sound / add_subcaption / say / voiceover (narration.py, recording only).
 """
 
 from __future__ import annotations
@@ -30,11 +31,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import manim  # noqa: E402
-from manim import ImageMobject, Scene, VMobject, Wait, config, tempconfig  # noqa: E402
+from manim import ImageMobject, Scene, Succession, VMobject, Wait, config, tempconfig  # noqa: E402
 from manim.renderer.cairo_renderer import CairoRenderer  # noqa: E402
 
 from .identity import OriginTracker, object_id, parent_map, resolve, site_of  # noqa: E402
 from .moves import MoveRecorder, parent_of, placement  # noqa: E402
+from . import narration  # noqa: E402
 
 QUALITIES = {"l": "low_quality", "m": "medium_quality", "h": "high_quality"}
 SUPPORTED = "0.22."
@@ -102,6 +104,7 @@ def install() -> OriginTracker:
     _tracker = OriginTracker()
     global _recorder
     _recorder = MoveRecorder(_tracker)
+    narration.install(_tracker)
     return _tracker
 
 
@@ -502,6 +505,11 @@ class Engine:
                     and getattr(obj, "construct", None) is not Scene.construct:
                 if any("construct" in vars(c) for c in obj.__mro__ if c is not Scene and issubclass(c, Scene)):
                     out.append(n)
+        # the file's own render order (a module-level SCENES list) comes first
+        order = getattr(self.module, "SCENES", None)
+        if isinstance(order, (list, tuple)) and all(isinstance(x, str) for x in order):
+            listed = [n for n in order if n in out]
+            out = listed + [n for n in out if n not in listed]
         return out
 
     def _error(self, e: BaseException) -> EngineError:
@@ -520,8 +528,14 @@ class Engine:
         site = site_of(f) if f is not None else None
         anims = []
         for i, a in enumerate(scene.animations):
+            offset = 0.0
+            # clip(x, start=s): Succession(Wait(s), x) -- report x and its offset
+            parts = getattr(a, "animations", None) if isinstance(a, Succession) else None
+            if parts and len(parts) == 2 and isinstance(parts[0], Wait) and not isinstance(parts[1], Wait):
+                offset, a = float(a.animations[0].run_time), a.animations[1]
             mob = None if isinstance(a, Wait) else getattr(a, "mobject", None)
             anims.append({"index": i, "class": type(a).__name__, "run_time": round(float(a.run_time), 4),
+                          "offset": round(offset, 4),
                           "rate_func": _rate_name(a.rate_func), "default_rate_func": _default_rate(type(a)),
                           "mobject": object_id(mob) if mob is not None else None,
                           "mobject_class": type(mob).__name__ if mob is not None else None,
@@ -540,7 +554,7 @@ class Engine:
                 "anims": anims}
 
     def run(self, scene_name: str, t: float | None = None, want_ids: bool = False,
-            events: list | None = None, stop: bool = True):
+            events: list | None = None, stop: bool = True, audio: dict | None = None):
         """Run construct() with every play skipped to its end; with t, capture
         the frame there and stop (or, with stop=False, run on to the end: one
         run gives both the frame and the whole trace). Returns (Capture,
@@ -599,6 +613,7 @@ class Engine:
             with tempconfig(self.config):
                 scene = cls()
                 scene.renderer._studio_hook = hook
+                scene._studio_audio = audio
                 try:
                     scene.render()
                 except _StopAt:
@@ -613,11 +628,12 @@ class Engine:
         """The scene's clips; with t, also the frame at t from the same run:
         (trace, Capture or None)."""
         events: list = []
+        audio = narration.new_record()
         err = None
         end = 0.0
         cap = None
         try:
-            cap, scene, end = self.run(scene_name, t, want_ids, events, stop=False)
+            cap, scene, end = self.run(scene_name, t, want_ids, events, stop=False, audio=audio)
         except EngineError as e:
             err = {"message": str(e), "line": e.line, "traceback": e.tb}
             if events:
@@ -625,7 +641,9 @@ class Engine:
                 end = last["start"] + last["duration"]
         bases = [c.__name__ for c in getattr(self.module, scene_name).__mro__[1:]
                  if c.__module__.startswith("manim") or c.__name__ in ("TimedScene",)][:3]
+        cls = getattr(self.module, scene_name)
         out = {"name": scene_name, "events": events, "duration": round(end, 6), "error": err,
+               "audio": narration.finish(audio, cls),
                "bases": bases, "target": getattr(getattr(self.module, scene_name), "TARGET", None) or None}
         return out if t is None else (out, cap)
 

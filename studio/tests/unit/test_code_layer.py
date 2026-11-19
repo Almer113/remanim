@@ -175,3 +175,26 @@ def test_property_edits():
 def test_text_positional_string():
     o = obj(4, "Text", ["text"])
     assert 'Text("Bye", font_size=36)' in prop(o, "text", {"string": "Bye"})[3]
+
+
+def test_rate_func_outside_star_import_is_qualified():
+    # `from manim import *` has no bare ease_out_back; rate_functions.<name> it is
+    lines = run(clip(3, "play", "play", default_rate_func="smooth"), "rate_func", "ease_out_back")
+    assert lines[2].endswith("rate_func=rate_functions.ease_out_back)")
+    lines = run(clip(3, "play", "play", default_rate_func="smooth"), "rate_func", "there_and_back")
+    assert lines[2].endswith("rate_func=there_and_back)")
+
+
+def test_long_nested_keyword_moves_the_rest_to_its_own_line():
+    import ast
+    code = ("class Q(Scene):\n    def construct(self):\n"
+            "        self.play(FadeIn(title), FadeIn(blob, shift=UP * 0.2), run_time=0.8)\n")
+    s = Source(code.encode())
+    call = next(n for n in ast.walk(s.tree) if isinstance(n, ast.Call) and s.text(n) == "FadeIn(title)")
+    e = set_keyword(s, call, "rate_func", "rate_functions.ease_out_back")
+    out = apply(s.data, [e]).decode()
+    assert out.splitlines()[2:] == [
+        "        self.play(FadeIn(title,",
+        "                         rate_func=rate_functions.ease_out_back),",
+        "                  FadeIn(blob, shift=UP * 0.2), run_time=0.8)"]
+    assert apply(apply(s.data, [e]), inverse(s.data, [e])) == s.data

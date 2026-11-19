@@ -5,6 +5,8 @@
 Contents
   TimedScene      VoiceoverScene with an absolute timeline: `at(t)`, non-blocking
                   narration `say()`, and an optional TARGET length lock.
+  clip            an animation placed on its play()'s own timeline (a delay
+                  and/or a length), so clips in one play() can overlap.
   Blob, blink     a simple original character with moods, and a blink animation.
   ThoughtCloud    cloud bubble with trailing puffs; `thought_cloud_for(blob)`.
   SpeechBubble    ellipse + tail as one clean outline.
@@ -163,6 +165,15 @@ class TimedScene(VoiceoverScene):
     def tear_down(self):
         self.lock_to_target()
         super().tear_down()
+
+
+def clip(anim: Animation, start: float = 0.0, length: float | None = None) -> Animation:
+    """An animation placed on its play()'s local timeline: it starts `start`
+    seconds into the play and lasts `length` (else its own run_time).
+    Don't give that play() a run_time=: it would stretch every clip in it."""
+    if length is not None:
+        anim.run_time = length
+    return Succession(Wait(start), anim) if start else anim
 
 
 # ── Character ────────────────────────────────────────────────────────────

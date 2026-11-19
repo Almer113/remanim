@@ -215,6 +215,41 @@ async def idmap(req: web.Request):
                         headers={"Cache-Control": "max-age=3600, immutable"})
 
 
+_sound: dict = {}  # (file, rev, scene) -> (wav bytes, waveforms); last few only
+
+
+def _scene_sound(doc: Document, scene: str):
+    from . import audio
+    key = (doc.name, doc.rev, scene)
+    if key not in _sound:
+        tr = doc.traces.get(scene)
+        if tr is None:
+            raise web.HTTPNotFound(text="scene not traced")
+        _sound[key] = (audio.wav_bytes(audio.mix(tr)), audio.waveforms(tr))
+        while len(_sound) > 8:
+            _sound.pop(next(iter(_sound)))
+    return _sound[key]
+
+
+async def sound(req: web.Request):
+    doc = _doc(req)
+    q = req.query
+    if int(q.get("rev", doc.rev)) != doc.rev:
+        raise web.HTTPGone(text="old revision")
+    wav, _ = await asyncio.to_thread(_scene_sound, doc, q["scene"])
+    return web.Response(body=wav, content_type="audio/wav",
+                        headers={"Cache-Control": "max-age=3600, immutable"})
+
+
+async def sound_peaks(req: web.Request):
+    doc = _doc(req)
+    q = req.query
+    if int(q.get("rev", doc.rev)) != doc.rev:
+        raise web.HTTPGone(text="old revision")
+    _, waves = await asyncio.to_thread(_scene_sound, doc, q["scene"])
+    return web.json_response({"rev": doc.rev, "scene": q["scene"], "sounds": waves})
+
+
 async def files(req):
     return web.json_response(await asyncio.to_thread(scene_files))
 
@@ -302,7 +337,9 @@ async def handle(msg: dict) -> dict | None:
         await doc.send_model()
         return None
     if t in ("edit.timing", "edit.prop", "edit.move", "edit.scale", "edit.rotate", "edit.insert",
-             "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip"):
+             "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip",
+             "edit.voice", "edit.shift", "edit.offset", "edit.merge", "edit.split", "edit.reorder",
+             "edit.scene_order", "edit.section"):
         return await doc.edit(msg)
     if t == "edit.confirm":
         return await doc.confirm(msg["token"])
@@ -342,6 +379,8 @@ def make_app() -> web.Application:
     app.router.add_get("/frame", frame)
     app.router.add_get("/objects", objects)
     app.router.add_get("/idmap", idmap)
+    app.router.add_get("/audio", sound)
+    app.router.add_get("/audio/peaks", sound_peaks)
     app.router.add_get("/ws", ws_handler)
     if (WEB / "assets").exists():
         app.router.add_static("/assets", WEB / "assets")

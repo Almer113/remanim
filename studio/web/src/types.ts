@@ -10,6 +10,8 @@ export interface Anim {
   default_rate_func: string | null;
   mobject: string | null;
   mobject_class: string | null;
+  /** seconds into its play() (clip(x, start=s)); 0 for most */
+  offset?: number;
 }
 
 export interface Clip {
@@ -25,6 +27,8 @@ export interface Clip {
   anims: Anim[];
   anim_runtimes: boolean[];
   play_runtime?: boolean;
+  /** ordinal among the scene's play() clips (what timeline edits name) */
+  play_index?: number;
   tier: number;
   text: string | null;
 }
@@ -46,6 +50,36 @@ export interface SceneModel {
   clips: Clip[];
   rows: Row[];
   frames: number;
+  timed?: boolean;
+  voice?: VoiceLine[];
+  captions?: { text: string; start: number; end: number; line: number | null }[];
+  burned_captions?: boolean;
+  sounds?: { file: string; start: number; line: number | null }[];
+  sections?: { index: number; name: string; start: number; line: number | null }[];
+}
+
+export interface VoiceLine {
+  index: number;
+  kind: "say" | "voiceover";
+  text: string;
+  caption: string | null;
+  start: number;
+  requested: number;
+  duration: number;
+  hold: number;
+  block_end: number | null;
+  bookmarks: { name: string; t: number }[];
+  line: number | null;
+  lock: string | null;
+  movable: boolean;
+  warnings: string[];
+}
+
+export interface SoundWave {
+  file: string;
+  start: number;
+  duration: number;
+  peaks: number[];
 }
 
 export interface Model {

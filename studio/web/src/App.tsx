@@ -27,6 +27,7 @@ export function App() {
   const [f, setF] = useState(0);
   const [rest, setRest] = useState(true);
   const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(() => localStorageGet("studio.muted") === "1");
   // objects belong to one frame of one revision; anything else is stale
   const [objs, setObjs] = useState<{ key: string; list: Obj[] }>({ key: "", list: [] });
   const [sel, setSel] = useState<Selection>(null);
@@ -176,14 +177,25 @@ export function App() {
 
   // -- playback ----------------------------------------------------------------------
   const playRef = useRef<{ t0: number; f0: number } | null>(null);
+  const hasSound = !!scene && !scene.pending && ((scene.voice ?? []).length > 0 || (scene.sounds ?? []).length > 0);
   useEffect(() => {
     if (!playing) return;
     playRef.current = { t0: performance.now(), f0: f >= nFrames - 1 ? 0 : f };
     setRest(false);
+    // the scene's narration and sounds, mixed by the server (GET /audio); the
+    // audio clock drives the frames while it plays, so picture and words stay together
+    let audio: HTMLAudioElement | null = null;
+    if (hasSound && !muted && model && scene) {
+      audio = new Audio(`/audio?file=${encodeURIComponent(model.file)}&scene=${encodeURIComponent(scene.name)}&rev=${model.rev}`);
+      audio.currentTime = playRef.current.f0 / fps;
+      audio.play().catch(() => {});
+    }
     let raf = 0;
     const tick = () => {
       const p = playRef.current!;
-      const nf = p.f0 + Math.floor(((performance.now() - p.t0) / 1000) * fps);
+      const viaAudio = audio && !audio.paused && audio.currentTime > 0;
+      const nf = viaAudio ? Math.floor(audio!.currentTime * fps)
+        : p.f0 + Math.floor(((performance.now() - p.t0) / 1000) * fps);
       if (nf >= nFrames - 1) {
         setF(nFrames - 1);
         setPlaying(false);
@@ -194,7 +206,7 @@ export function App() {
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => { cancelAnimationFrame(raf); audio?.pause(); };
   }, [playing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const seek = useCallback((nf: number, atRest: boolean) => {
@@ -384,6 +396,7 @@ export function App() {
         <strong className="brand">Manim Studio</strong>
         <select value={file} onChange={(e) => setFile(e.target.value)} title="Scene file">
           <option value="" disabled>Open a scene file…</option>
+          {file && !files.some((x) => x.path === file) && <option value={file}>{file}</option>}
           {files.map((x) => <option key={x.path} value={x.path}>{x.path}</option>)}
         </select>
         <button onClick={newFile} title="A new scene file from the studio template">+ New file</button>
@@ -392,6 +405,23 @@ export function App() {
             {model.scenes.map((s) => <option key={s.name} value={s.name}>{s.name}{s.pending ? " (tracing…)" : ""}</option>)}
           </select>
         )}
+        {model && model.scenes.length > 1 && scene && (() => {
+          const names = model.scenes.map((s) => s.name);
+          const i = names.indexOf(scene.name);
+          const moveScene = (d: number) => {
+            const order = [...names];
+            order.splice(i, 1);
+            order.splice(i + d, 0, scene.name);
+            sendEdit({ type: "edit.scene_order", order });
+          };
+          return (
+            <span className="scene-order" title="Render order (the file's SCENES list)">
+              <button disabled={!canEdit || i <= 0} onClick={() => moveScene(-1)}>◀</button>
+              <span className="muted">{i + 1}/{names.length}</span>
+              <button disabled={!canEdit || i >= names.length - 1} onClick={() => moveScene(1)}>▶</button>
+            </span>
+          );
+        })()}
         <span className="grow" />
         {model && (
           <span className={`pill ${err ? "err" : ready ? "ok" : "warm"}`}>
@@ -452,6 +482,8 @@ export function App() {
               <button onClick={togglePlay} disabled={!ready} title="Play / pause (Space)">{playing ? "⏸" : "▶"}</button>
               <span className="mono">{time} / {scene && !scene.pending ? scene.duration.toFixed(2) : "…"} s · frame {f}</span>
               {scene?.target ? <span className="muted">TARGET {scene.target} s</span> : null}
+              {hasSound && <button className="ghost" onClick={() => { const m = !muted; setMuted(m); localStorageSet("studio.muted", m ? "1" : "0"); }}
+                title={muted ? "Sound off: narration is not played" : "Sound on: narration plays with the picture"}>{muted ? "🔇" : "🔊"}</button>}
               <span className="muted">{fps} fps</span>
             </div>
             {err && <div className="errbar">⚠ {err.message}{err.line ? ` (line ${err.line})` : ""} — editing is paused until the file runs again.</div>}
@@ -465,8 +497,9 @@ export function App() {
 
           <section className="timeline-wrap">
             {scene && !scene.pending && (
-              <Timeline scene={scene} f={f} fps={fps} nFrames={nFrames}
-                sel={sel} onSeek={seek}
+              <Timeline scene={scene} file={model!.file} rev={model!.rev} session={session} f={f} fps={fps} nFrames={nFrames}
+                sel={sel} onSeek={seek} editable={canEdit} onEdit={sendEdit}
+                onBlocked={(why) => toast("info", why)}
                 onSelectClip={(clip, anim) => setSel({ kind: "clip", clip, anim, line: scene.clips[clip]?.line,
                   text: scene.clips[clip]?.text })}
                 selectedObjectId={sel?.kind === "object" ? sel.obj.id : null}
