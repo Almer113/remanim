@@ -145,7 +145,7 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
   }
 
   if (sel.kind === "clip") {
-    const c = scene.clips[sel.clip];
+    const c = scene.clips?.[sel.clip];
     if (!c) return null;
     const a = sel.anim !== null ? c.anims[sel.anim] : null;
     const locked = c.lock ?? (c.tier === 3 ? "tier 3 code: edit it in the code" : null);

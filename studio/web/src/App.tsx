@@ -149,7 +149,8 @@ export function App() {
     return () => { gone = true; };
   }, [wantPrev, prevKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // the selected play() is under the playhead: show where its transforms go (step 8)
-  const selClip = sel?.kind === "clip" && scene ? scene.clips[sel.clip] : null;
+  // (not while the scene is re-tracing: a pending scene has no clips yet)
+  const selClip = sel?.kind === "clip" && scene && !scene.pending ? scene.clips?.[sel.clip] ?? null : null;
   // (not in 3D: the ghost boxes are world units, not what the tilted camera shows)
   const ghosts: Ghost[] | null = selClip && objs.key === frameKey && objs.ghosts && objs.camera?.kind !== "3d"
     && selClip.start - 1e-6 <= f / fps && f / fps < selClip.start + selClip.duration
