@@ -50,10 +50,10 @@ def app_browser() -> str | None:
 
 
 def is_studio(url: str) -> bool:
-    """Is the program on that port the studio (not some other server)?"""
+    """Is the program on that port reManim (not some other server)?"""
     try:
         with urllib.request.urlopen(url, timeout=2) as r:
-            return b"Manim Studio" in r.read(65536)
+            return b"<title>reManim</title>" in r.read(65536)
     except Exception:
         return False
 
@@ -111,7 +111,7 @@ def main():
     note = ui_note()
     if note:
         print(f"Note: {note}", flush=True)
-    print(f"Manim Studio on http://127.0.0.1:{args.port}", flush=True)
+    print(f"reManim on http://127.0.0.1:{args.port}", flush=True)
     if app.TRUSTED_HOSTS:
         import secrets
         app.ACCESS_TOKEN = secrets.token_urlsafe(24)

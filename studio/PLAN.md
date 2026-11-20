@@ -1,11 +1,13 @@
-# Manim Studio: plan
+# reManim: plan
 
 A motion-editor GUI for Manim, inspired by After Effects, CapCut and Figma,
 where the `.py` file stays the only source of truth. Write in code and edit in
 the GUI, or create in the GUI and edit in code.
 
-"Studio" is a working title. At least five unrelated projects are already
-called "Manim Studio", so a real name is needed before any public release.
+The app is called **reManim** (decided 2026-11-20): edits made in the GUI go
+back into your Manim code. "Manim Studio", the working title, was already
+taken by several unrelated projects. The folder stays `studio/` and the
+server `python -m studio.server`; lowercase identifiers use `remanim`.
 
 Status: Phase 0 done (go). Phase 1 done: wireframes and code specification
 approved 2026-11-18. Phase 2 done 2026-11-18: exit criteria met
@@ -261,6 +263,19 @@ targets met (reopen over 3 s on two big files), every catalogue row tried, a
 fresh clone starts from the README. Optional items built: the app window
 (`--app`) and the Claude panel. Open: undo's frame not seeded from the cache,
 a visible-pane UI frame-time measurement, name and licence.
+
+### Phase 7. What the first real video showed (M)
+
+The first real video made in the studio (`euler_identity.py`, friction
+log in `plans/euler_identity.md`) sent us to the code for adding scenes,
+setting a scene's length and narrating a silent scene, and hit two traps
+(scene arrows that reorder, a New file prompt the browser pane can't
+show). This phase closes those, adds a warning for fades over speech,
+polishes the inspector, timeline and layout, and finishes Phase 6's open
+items. Exit: a second real video made without hand-written code for any
+of those steps. Plan in `docs/phase7/plan.md`.
+
+**Status (2026-11-20): planned, waiting for approval.**
 
 ## 6. Testing
 

@@ -8,13 +8,13 @@
       "port": 8765
     },
     {
-      "name": "manim-studio",
+      "name": "remanim",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "studio.server"],
       "port": 8770
     },
     {
-      "name": "manim-studio-tailnet",
+      "name": "remanim-tailnet",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "studio.server", "--allow-host", "your-pc.your-tailnet.ts.net"],
       "port": 8770

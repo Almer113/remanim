@@ -1,4 +1,4 @@
-# Manim Studio
+# reManim
 
 A motion editor for [Manim Community Edition](https://www.manim.community/)
 scenes. You see the real Manim frame and a timeline of every `play()` and
@@ -10,8 +10,9 @@ code reads as if you had typed it.
 
 ![The studio with order_matters.py open](docs/img/studio.png)
 
-"Manim Studio" is a working title. The design, its decisions and the
-phases are in [PLAN.md](PLAN.md).
+reManim (the GUI edits go back into your Manim code) was called "Manim
+Studio" while it was built; the folder is still `studio/`. The design, its
+decisions and the phases are in [PLAN.md](PLAN.md).
 
 ## Starting it
 
@@ -35,10 +36,10 @@ Start the server from the project root:
 ```
 
 Open <http://127.0.0.1:8770>. In the Claude desktop app, the launch
-configuration `manim-studio` does the same in the browser pane.
+configuration `remanim` does the same in the browser pane.
 
 To use it like an app, in its own window without tabs or an address bar,
-double-click `studio/Manim Studio.cmd` (or add `--app`). It opens Edge or
+double-click `studio/reManim.cmd` (or add `--app`). It opens Edge or
 Chrome in app mode; nothing is installed. Close the console window to
 stop the studio. If the studio is already running, the shortcut only
 opens another window onto it. Pin the window to the taskbar if you like.

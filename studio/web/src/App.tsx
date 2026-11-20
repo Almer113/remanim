@@ -613,7 +613,7 @@ export function App() {
   return (
     <div className="app">
       <header className="bar" ref={barRef}>
-        <strong className="brand">Manim Studio</strong>
+        <strong className="brand">reManim</strong>
         <select className="file-pick" value={file} onChange={(e) => setFile(e.target.value)} title="Scene file">
           <option value="" disabled>Open a scene file…</option>
           {file && !files.some((x) => x.path === file) && <option value={file}>{file}</option>}

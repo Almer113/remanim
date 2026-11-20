@@ -41,7 +41,7 @@ TOOLS = "Read Edit Write Glob Grep"
 # (a value like "--some-flag" after --resume would be read as a flag)
 SESSION_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 SYSTEM = (
-    "You are answering inside Manim Studio, a visual editor for Manim CE scene files. "
+    "You are answering inside reManim, a visual editor for Manim CE scene files. "
     "The studio reloads the file by itself when you save it, so after an edit just say what you changed. "
     "Keep edits small and readable; the user also edits this file by hand and in the studio. "
     "You have no shell here: don't try to render; the studio shows the result."

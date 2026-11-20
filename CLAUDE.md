@@ -57,12 +57,12 @@ pane, not VS Code.
   `tools/frames.py --no-render`. `check_layout.py` is safe: it uses its own
   `media/Tex_check` folder.
 - Plans for a video go in `plans/<video>.md` (see Workflow).
-- `studio/` — the Manim Studio GUI project (a motion editor where the `.py`
+- `studio/` — the reManim GUI project (a motion editor where the `.py`
   file stays the source of truth). Its plan, decisions and phases are in
   `studio/PLAN.md`; read it before any studio work. It is separate from
   `preview_server.py`, shares no code with the videos, and nothing in it may
   break the preview or the check tools. `README.md` maps the whole folder.
-  Run it with launch config `manim-studio` (port 8770; rebuild the UI with
+  Run it with launch config `remanim` (port 8770; rebuild the UI with
   `npm run build` in `studio/web` after changing it). Tests:
   `.venv/Scripts/python -m pytest -q studio/tests`; full corpus:
   `studio/tests/corpus_run.py`. Its workers share `media/Tex_studio`, so

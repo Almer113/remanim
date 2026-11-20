@@ -15,7 +15,7 @@ the tools built around them. Working rules for Claude are in `CLAUDE.md`.
 | `preview_server.py` | Live preview with code-linked timeline, for AI-driven work |
 | `tools/` | Layout check, frame sheets, audio check, joining, comparison, timeline recording |
 | `plans/` | One plan per video |
-| `studio/` | The Manim Studio GUI project. Start with `studio/PLAN.md` |
+| `studio/` | The reManim GUI project (motion editor). Start with `studio/PLAN.md` |
 | `docs/` | Write-ups of what we learned |
 | `reports/`, `research_notes/` | Research surveys and the notes behind them |
 | `reference/` | Downloaded reference material for the recreation |
