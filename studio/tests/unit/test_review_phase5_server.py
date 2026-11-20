@@ -65,7 +65,9 @@ def test_no_token_configured_means_no_remote_access(monkeypatch):
     monkeypatch.setattr(app, "TRUSTED_HOSTS", {"box.tail.ts.net"})
     monkeypatch.setattr(app, "ACCESS_TOKEN", "")
     with pytest.raises(web.HTTPForbidden):
-        _call("/?token=", "box.tail.ts.net:8770")
+        _call("/api/files?token=", "box.tail.ts.net:8770")
+    page = _call("/?token=", "box.tail.ts.net:8770")  # the page asking for a token, still a refusal
+    assert page.status == 403 and "access token" in page.text
 
 
 def test_origin_must_be_the_request_host(tailnet):

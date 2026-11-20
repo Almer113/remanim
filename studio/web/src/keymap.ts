@@ -7,7 +7,7 @@ export type Action =
   | "play" | "back" | "forward" | "back1s" | "forward1s" | "start" | "end" | "prevClip" | "nextClip"
   | "nudgeLeft" | "nudgeRight" | "nudgeUp" | "nudgeDown"
   | "undo" | "redo" | "duplicate" | "group" | "delete" | "clear"
-  | "export" | "help" | "ripple" | "marker";
+  | "prevScene" | "nextScene" | "export" | "help" | "ripple" | "marker";
 
 export interface Binding {
   action: Action;
@@ -57,6 +57,8 @@ export const BINDINGS: Binding[] = [
   { action: "ripple", keys: ["R"], label: "Ripple on / off", group: "Timeline", match: [{ key: "r" }] },
   { action: "marker", keys: ["M"], label: "Marker at the playhead", group: "Timeline", match: [{ key: "m" }] },
 
+  { action: "prevScene", keys: ["PageUp"], label: "Previous scene", group: "App", match: [{ key: "pageup" }] },
+  { action: "nextScene", keys: ["PageDown"], label: "Next scene", group: "App", match: [{ key: "pagedown" }] },
   { action: "export", keys: ["Ctrl+E"], label: "Export video", group: "App", match: [{ key: "e", ctrl: true }] },
   { action: "help", keys: ["?"], label: "Show the keyboard shortcuts", group: "App", match: [{ key: "?", shift: "any" }] },
 ];

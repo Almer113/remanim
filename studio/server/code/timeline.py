@@ -1266,3 +1266,119 @@ def dead_anchors(old: Source, old_trace: dict, new: Source, new_trace: dict, sce
         return [], ""
     what = ", ".join(f"{new.text(s.value)} (line {s.lineno})" for s in dead)
     return edits, f"; removed {what}: it no longer waits for anything"
+
+
+# -- TARGET: the scene's length (Phase 7 step 4) -------------------------------------------
+def target_stmt(src: Source, scene: str):
+    """The scene class's own `TARGET = ...` statement, or None (inherited or unset)."""
+    for node in src.tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == scene:
+            for b in node.body:
+                tgt = (b.targets[0] if isinstance(b, ast.Assign) and len(b.targets) == 1
+                       else getattr(b, "target", None) if isinstance(b, ast.AnnAssign) else None)
+                if isinstance(tgt, ast.Name) and tgt.id == "TARGET" and b.value is not None:
+                    return b
+            return None
+    raise EditError(f"no class {scene} in the file")
+
+
+def plan_target(src: Source, scene: str, value: float) -> Plan:
+    """Set the scene's TARGET: its own literal is changed; a computed one is
+    refused; without one of its own, a `TARGET = value` line is added to the
+    class (it overrides an inherited one)."""
+    value = round(float(value), 2)
+    if not 0 < value <= 3600:
+        raise EditError("a length in seconds, more than 0")
+    st = target_stmt(src, scene)
+    if st is not None:
+        old = number_of(st.value)
+        if old is None:
+            raise EditError(f"TARGET is computed ({src.text(st.value)}, line {st.lineno}); change it in the code")
+        if abs(old - value) < 1e-9:
+            raise EditError(f"TARGET is already {fmt(old)}")
+        return Plan([set_number(src, st.value, value)], f"TARGET {fmt(old)} → {fmt(value)}",
+                    checks={"target": value})
+    cls = next(n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == scene)
+    v = fmt(value) + (".0" if float(value).is_integer() and _point_style(src, "target") else "")
+    text = f"TARGET = {v}"
+    return Plan([_class_setting(src, cls, text)], f"{text} added", checks={"target": value})
+
+
+def _class_setting(src: Source, cls: ast.ClassDef, text: str) -> Edit:
+    """A new `NAME = value` line in a class: after its docstring and its other
+    settings, before its first method."""
+    nl = src.newline
+    ind = src.indent_of(cls.body[0].lineno)
+    body = list(cls.body)
+    k = 0
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+            and isinstance(body[0].value.value, str):
+        k = 1  # after the docstring
+    while k < len(body) and isinstance(body[k], (ast.Assign, ast.AnnAssign)):
+        k += 1  # after the class's other settings (VOICE, CAPTIONS, ...)
+    if k > 0:
+        at = src.line_end(body[k - 1].end_lineno)
+        return Edit(at, at, f"{ind}{text}{nl}")
+    first = body[0]
+    line = min([first.lineno] + [d.lineno for d in getattr(first, "decorator_list", [])])
+    at = src.line_starts[line - 1]
+    return Edit(at, at, f"{ind}{text}{nl}{nl}")
+
+
+# -- VOICE: narrating a silent scene (Phase 7 step 5) ---------------------------------------
+HOUSE_VOICE = "en-US-AndrewNeural"
+
+
+def class_chain(src: Source, scene: str) -> list[ast.ClassDef]:
+    """The scene class and its base classes defined in this file, nearest first."""
+    classes = {n.name: n for n in src.tree.body if isinstance(n, ast.ClassDef)}
+    out, todo = [], [scene]
+    while todo:
+        name = todo.pop(0)
+        c = classes.get(name)
+        if c is None or c in out:
+            continue
+        out.append(c)
+        todo.extend(b.id for b in c.bases if isinstance(b, ast.Name))
+    return out
+
+
+def _setting(cls: ast.ClassDef, attr: str):
+    for st in cls.body:
+        tgt = (st.targets[0] if isinstance(st, ast.Assign) and len(st.targets) == 1
+               else getattr(st, "target", None) if isinstance(st, ast.AnnAssign) else None)
+        if isinstance(tgt, ast.Name) and tgt.id == attr and st.value is not None:
+            return st
+    return None
+
+
+def voice_state(src: Source, scene: str) -> dict:
+    """Who sets the scene's VOICE in this file, and whether it is None (silent)."""
+    for cls in class_chain(src, scene):
+        st = _setting(cls, "VOICE")
+        if st is not None:
+            silent = isinstance(st.value, ast.Constant) and st.value.value is None
+            return {"silent": silent, "owner": cls.name, "line": st.lineno}
+    return {"silent": False, "owner": None, "line": None}
+
+
+def plan_set_voice(src: Source, scene: str, where: str) -> Plan:
+    """Give a silent scene the house voice: on the scene class itself
+    (where="class"), or on the base class that sets VOICE = None
+    (where="base": every scene built on it gets the voice)."""
+    vs = voice_state(src, scene)
+    if not vs["silent"]:
+        raise EditError("this scene already has a voice")
+    owner = next(c for c in class_chain(src, scene) if c.name == vs["owner"])
+    st = _setting(owner, "VOICE")
+    lit = _string_like(src, None, HOUSE_VOICE)
+    if where == "base":
+        if owner.name == scene:
+            raise EditError("VOICE = None is on the scene itself, not on a base class")
+        return Plan([Edit(*src.span(st.value), lit)], f"VOICE on {owner.name} → {lit}")
+    if where != "class":
+        raise EditError(f"where must be 'class' or 'base', not {where!r}")
+    if owner.name == scene:
+        return Plan([Edit(*src.span(st.value), lit)], f"VOICE → {lit}")
+    cls = class_chain(src, scene)[0]
+    return Plan([_class_setting(src, cls, f"VOICE = {lit}")], f"VOICE = {lit} added to {scene}")

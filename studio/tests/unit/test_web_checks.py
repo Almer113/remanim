@@ -24,3 +24,9 @@ def test_readme_shortcuts_match_the_keymap():
     begin = readme.index("-->", readme.index("<!-- keys:begin")) + 3
     table = readme[begin:readme.index("<!-- keys:end")].strip()
     assert table == out.stdout.strip(), "README shortcuts are out of date: run node web/checks/keymap_md.ts"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node isn't installed")
+def test_reconnect_backoff_sequence():
+    out = subprocess.run(["node", "checks/backoff_check.ts"], cwd=WEB, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stdout + out.stderr

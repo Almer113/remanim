@@ -25,6 +25,9 @@ interface Props {
   actions: { remove: () => void; duplicate: () => void; group: () => void; count: number; partColour?: (() => void) | null };
 }
 
+/** 1.3, 0.25, 30: no trailing zeros. */
+function fmtNum(v: number): string { return String(Math.round(v * 1000) / 1000); }
+
 /** Parse a typed number and run `go`; returns the reason when it isn't one. */
 function num(v: string, go: (n: number) => void | string): string | null {
   const n = Number(v.trim());
@@ -51,13 +54,24 @@ function parseValue(text: string): object | null {
 /** An input that commits on Enter. Leaving it undoes the change (an edit
  * replays the scene, so it never fires by accident); a wrong value stays
  * in the box, marked, with the reason. */
-function Field({ label, value, onCommit, disabled, title }: {
+function Field({ label, value, onCommit, disabled, title, readOnly }: {
   label: string; value: string; onCommit: (v: string) => string | null; disabled?: boolean; title?: string;
+  /** a value the code computes: shown greyed, with the reason, not editable */
+  readOnly?: string | null;
 }) {
   const [v, setV] = useState(value);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => { setV(value); setErr(null); }, [value]);
   const dirty = v !== value;
+  if (readOnly) {
+    return (
+      <div className="row" title={readOnly}>
+        <label>{label}</label>
+        <input value={value} readOnly aria-readonly="true" className="computed" aria-description={readOnly} tabIndex={-1} />
+        <span className="field-hint" title={readOnly}>computed</span>
+      </div>
+    );
+  }
   return (
     <div className="row" title={err ?? title}>
       <label>{label}</label>
@@ -161,6 +175,7 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
         <div className="row"><label>Starts</label><span className="mono">{c.start.toFixed(3)} s</span></div>
         <Field label={c.kind === "wait" ? (c.call_name === "at" ? "Pause" : "wait") : "run_time"}
           value={dur.toFixed(3).replace(/\.?0+$/, "")} disabled={!!locked || busy}
+          readOnly={locked ? null : (a ? c.anim_locks?.[sel.anim!] : c.duration_lock) ?? null}
           title={c.call_name === "at" ? "changes the at() time that ends this pause" : "Enter to apply"}
           onCommit={(v) => {
             const n = Number(v.trim());
@@ -168,6 +183,26 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
             edit("duration", n);
             return null;
           }} />
+        {c.kind === "wait" && !locked && (() => {
+          // end this pause where a narration line (or its caption) ends: the next
+          // thing then starts after the words, not over them (Phase 7 step 7)
+          const ends = (scene.voice ?? [])
+            .map((v) => ({ t: v.start + Math.max(v.duration, v.hold ?? 0), text: v.caption || v.text }))
+            .filter((x) => x.t > c.start + 0.05)
+            .sort((p, q) => p.t - q.t).slice(0, 2);
+          return ends.length > 0 && (
+            <div className="row line-ends">
+              <label>End at</label>
+              <span>{ends.map((x) => {
+                const d = Math.round((x.t - c.start) * 100) / 100;
+                const words = x.text.length > 22 ? x.text.slice(0, 20).trimEnd() + "…" : x.text;
+                return <button key={x.t} className="small" disabled={busy || Math.abs(d - dur) < 0.01}
+                  title={`End the pause at ${x.t.toFixed(2)} s, when “${x.text}” ends (pause ${d} s)`}
+                  onClick={() => edit("duration", d)}>end of “{words}”</button>;
+              })}</span>
+            </div>
+          );
+        })()}
         {c.kind === "play" && (
           <div className="row">
             <label>Easing</label>
@@ -218,13 +253,16 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
       {o.center && !locked && !off && !busy && (
         <>
           <Field label="x" value={o.center[0].toFixed(2)} title="Where its centre is; Enter writes the move into the code"
-            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.move", object: o, f, dx: n - o.center![0], dy: 0 }))} />
+            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.move", object: o, f, dx: n - o.center![0], dy: 0, exact: true }))} />
           <Field label="y" value={o.center[1].toFixed(2)}
-            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.move", object: o, f, dx: 0, dy: n - o.center![1] }))} />
-          <Field label="scale ×" value="1" title="Scale about its centre, e.g. 1.5"
-            onCommit={(v) => num(v, (n) => n > 0 ? sendEdit({ type: "edit.scale", object: o, f, k: n }) : "more than 0")} />
-          <Field label="turn °" value="0" title="Turn anticlockwise by this many degrees"
-            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.rotate", object: o, f, deg: n }))} />
+            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.move", object: o, f, dx: 0, dy: n - o.center![1], exact: true }))} />
+          {/* the .scale() / .rotate() chained on the call that makes it: typing a value sets it */}
+          <Field label="scale" value={fmtNum(o.scale_now ?? 1)}
+            title={o.scale_now != null ? "Its .scale() in the code (1 = none); type the size you want" : "Scale about its centre by this factor"}
+            onCommit={(v) => num(v, (n) => n > 0 ? sendEdit({ type: "edit.scale", object: o, f, k: n / (o.scale_now ?? 1) }) : "more than 0")} />
+          <Field label="turn °" value={fmtNum(o.turn_now ?? 0)}
+            title={o.turn_now != null ? "Its .rotate() in the code, in degrees anticlockwise; type the angle you want" : "Turn anticlockwise by this many degrees"}
+            onCommit={(v) => num(v, (n) => sendEdit({ type: "edit.rotate", object: o, f, deg: n - (o.turn_now ?? 0) }))} />
         </>
       )}
       <div className="btns-row">

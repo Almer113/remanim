@@ -9,6 +9,14 @@ import { CodePeek } from "./CodePeek";
 import { ExportDialog, RUNNING, jobLine, type ExportJob } from "./ExportDialog";
 import { ClaudePanel } from "./ClaudePanel";
 import { BINDINGS, actionFor, nudgeStep, tip } from "./keymap";
+import { RenderOrderDialog } from "./RenderOrder";
+import { NewFileDialog } from "./NewFileDialog";
+import { SceneDialog, type SceneAction } from "./SceneDialog";
+import { TargetField } from "./TargetField";
+import { Splitter } from "./Splitter";
+
+// the scene dropdown's own entries (a class name has no spaces, so these can't clash)
+const MENU = { add: " add", rename: " rename", delete: " delete", order: " order" };
 
 const conn = new Conn();
 
@@ -37,6 +45,15 @@ export function App() {
   const [rest, setRest] = useState(true);
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(() => localStorageGet("studio.muted") === "1");
+  // the timeline's height (the splitter above it); null: the default share
+  const [tlH, setTlHState] = useState<number | null>(() => {
+    const v = Number(localStorageGet("studio.tlh"));
+    return Number.isFinite(v) && v >= 40 ? v : null;
+  });
+  const setTlH = useCallback((h: number | null) => {
+    setTlHState(h);
+    localStorageSet("studio.tlh", h == null ? "" : String(Math.round(h)));
+  }, []);
   // objects belong to one frame of one revision; anything else is stale
   const [objs, setObjs] = useState<{ key: string; list: Obj[]; camera?: CameraState | null; ghosts?: Ghost[] | null }>({ key: "", list: [] });
   const [sel, setSel] = useState<Selection>(null);
@@ -166,6 +183,14 @@ export function App() {
     setF(0);
     conn.send({ type: "scene", file, scene: name });
   };
+  // ◀ ▶ and PageUp / PageDown: the previous / next scene in the file's order
+  const goScene = (d: number) => {
+    if (!model || !scene) return;
+    const next = model.scenes[model.scenes.findIndex((s) => s.name === scene.name) + d];
+    if (next) chooseScene(next.name);
+  };
+  const [orderOpen, setOrderOpen] = useState(false);
+  const [sceneAction, setSceneAction] = useState<SceneAction | null>(null);
 
   // -- objects at the playhead (only at rest) -------------------------------------
   useEffect(() => {
@@ -323,7 +348,7 @@ export function App() {
   const handleReply = useCallback((r: any) => {
     setBusy(false);
     if (r.type === "edit.done") {
-      toast("ok", `✓ ${r.summary} · verified`);
+      toast(r.warning ? "info" : "ok", `✓ ${r.summary} · verified${r.warning ? ` · ⚠ ${r.warning}` : ""}`);
       setLastDiff(r.diff);
       clearTimeout(diffTimer.current);
       diffTimer.current = window.setTimeout(() => setLastDiff(null), 6000);
@@ -340,17 +365,20 @@ export function App() {
   // inFlight is set at once, not on the next render: two sends from one render
   // (a nudge flushed by a key, then that key's own edit) can't both go out
   const inFlight = useRef(false);
+  const [ripple, setRipple] = useState(true);
   const sendEdit = useCallback((msg: object): Promise<any> | null => {
     if (!model || !scene || busy || preview || inFlight.current) return null;
     inFlight.current = true;
     setBusy(true);
     // at: the playhead, so the edit's own replay can also hand back the frame shown next
-    return conn.request({ at: f, ...msg, file: model.file, scene: scene.name, rev: model.rev }).then((r) => {
+    // a retime ripples like a timeline move when ripple is on (later at() calls stay; TARGET follows the content end)
+    const extra = (msg as { type?: string }).type === "edit.timing" ? { ripple } : {};
+    return conn.request({ at: f, ...extra, ...msg, file: model.file, scene: scene.name, rev: model.rev }).then((r) => {
       inFlight.current = false;
       handleReply(r);
       return r;
     });
-  }, [model, scene, handleReply, busy, preview, f]);
+  }, [model, scene, handleReply, busy, preview, f, ripple]);
 
   const select = useCallback((o: Obj | null, how: "set" | "toggle" = "set") => {
     if (!o) { setSel(null); setOthers([]); return; }
@@ -449,16 +477,13 @@ export function App() {
     setPreview(null);
   }, [preview, model?.file]);
 
-  const newFile = useCallback(() => {
-    const name = window.prompt("New scene file (inside the project), e.g. my_scene.py", "my_scene.py");
-    if (!name) return;
-    conn.request({ type: "file.new", name }).then((r) => {
-      if (r.type !== "file.created") { toast("bad", r.message ?? "Couldn't make the file"); return; }
-      fetch("/api/files").then((x) => x.json()).then(setFiles).catch(() => {});
-      setFile(r.file);
-      setLeftTab("library");
-      toast("ok", `✓ Made ${r.file} with scene ${r.scene}`);
-    });
+  const [newOpen, setNewOpen] = useState(false);
+  const fileCreated = useCallback((made: string, sceneName: string) => {
+    setNewOpen(false);
+    fetch("/api/files").then((x) => x.json()).then(setFiles).catch(() => {});
+    setFile(made);
+    setLeftTab("library");
+    toast("ok", `✓ Made ${made} with scene ${sceneName}`);
   }, [toast]);
 
   const undoRedo = useCallback((which: "undo" | "redo") => {
@@ -555,6 +580,12 @@ export function App() {
         if (e.key === "Escape") { e.preventDefault(); setExportOpen(false); }
         return;
       }
+      if (newOpen) return;  // the dialog's own keys (it closes itself on Escape)
+      if (sceneAction) return;  // the dialog's own keys
+      if (orderOpen) {
+        if (e.key === "Escape") { e.preventDefault(); setOrderOpen(false); }
+        return;
+      }
       if (partPick || textEdit || camCanvas) return;
       if (helpOpen) {
         if (e.key === "Escape" || e.key === "?") { e.preventDefault(); setHelpOpen(false); }
@@ -594,6 +625,8 @@ export function App() {
         case "group": doGroup(); break;
         case "delete": doDelete(); break;
         case "clear": setSel(null); setOthers([]); break;
+        case "prevScene": goScene(-1); break;
+        case "nextScene": goScene(1); break;
         case "export": if (model?.scenes.length) setExportOpen(true); break;
         case "help": setHelpOpen(true); break;
       }
@@ -601,7 +634,7 @@ export function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup, doNudge, partPick, textEdit, // eslint-disable-line react-hooks/exhaustive-deps
-    camCanvas, exportOpen, helpOpen, sel, scene, model, flushNudge, toast]);
+    camCanvas, exportOpen, helpOpen, orderOpen, newOpen, sceneAction, sel, scene, model, flushNudge, toast]);
 
   // the dialog takes the focus (not a button: a second Enter from the field
   // must not answer it unread); Tab reaches the buttons, Escape cancels
@@ -613,34 +646,43 @@ export function App() {
   return (
     <div className="app">
       <header className="bar" ref={barRef}>
-        <strong className="brand">reManim</strong>
+        <img className="brand" src="/icons/wordmark-dark.svg" alt="reManim" height={24} />
         <select className="file-pick" value={file} onChange={(e) => setFile(e.target.value)} title="Scene file">
           <option value="" disabled>Open a scene file…</option>
           {file && !files.some((x) => x.path === file) && <option value={file}>{file}</option>}
           {files.map((x) => <option key={x.path} value={x.path}>{x.path}</option>)}
         </select>
-        <button onClick={newFile} title="A new scene file from the studio template">+ New file</button>
+        <button onClick={() => setNewOpen(true)} title="A new scene file from the studio template">+ New file</button>
         {model && (
-          <select value={scene?.name ?? ""} onChange={(e) => chooseScene(e.target.value)} title="Scene">
+          <select value={scene?.name ?? ""} title="Scene" onChange={(e) => {
+            const v = e.target.value;
+            if (v === MENU.order) setOrderOpen(true);
+            else if (v === MENU.add) setSceneAction("add");
+            else if (v === MENU.rename) setSceneAction("rename");
+            else if (v === MENU.delete) setSceneAction("delete");
+            else chooseScene(v);
+          }}>
             {model.scenes.map((s) => <option key={s.name} value={s.name}>{s.name}{s.pending ? " (tracing…)" : ""}</option>)}
+            {scene && (
+              <optgroup label="Scenes">
+                <option value={MENU.add}>New scene…</option>
+                <option value={MENU.rename}>Rename {scene.name}…</option>
+                {model.scenes.length > 1 && <option value={MENU.delete}>Delete {scene.name}…</option>}
+                {model.scenes.length > 1 && <option value={MENU.order}>Render order…</option>}
+              </optgroup>
+            )}
           </select>
         )}
+        {model && scene && <button disabled={!canEdit} onClick={() => setSceneAction("add")}
+          title="A new scene class in this file">+ scene</button>}
         {model && model.scenes.length > 1 && scene && (() => {
-          const names = model.scenes.map((s) => s.name);
-          const i = names.indexOf(scene.name);
-          const moveScene = (d: number) => {
-            const order = [...names];
-            order.splice(i, 1);
-            order.splice(i + d, 0, scene.name);
-            sendEdit({ type: "edit.scene_order", order });
-          };
+          const i = model.scenes.findIndex((s) => s.name === scene.name);
+          const n = model.scenes.length;
           return (
-            <span className="scene-order" title="Render order (the file's SCENES list)">
-              <button disabled={!canEdit || i <= 0} onClick={() => moveScene(-1)}
-                title="Render this scene earlier" aria-label="Render this scene earlier">◀</button>
-              <span className="muted">{i + 1}/{names.length}</span>
-              <button disabled={!canEdit || i >= names.length - 1} onClick={() => moveScene(1)}
-                title="Render this scene later" aria-label="Render this scene later">▶</button>
+            <span className="scene-order">
+              <button disabled={i <= 0} onClick={() => goScene(-1)} title={tip("prevScene")}>◀</button>
+              <span className="muted">{i + 1}/{n}</span>
+              <button disabled={i >= n - 1} onClick={() => goScene(1)} title={tip("nextScene")}>▶</button>
             </span>
           );
         })()}
@@ -672,6 +714,28 @@ export function App() {
       </header>
 
       {helpOpen && <HelpSheet onClose={() => setHelpOpen(false)} />}
+      {newOpen && <NewFileDialog conn={conn} onCreated={fileCreated} onClose={() => setNewOpen(false)} />}
+      {sceneAction && model && scene && (
+        <SceneDialog action={sceneAction} scene={scene.name} busy={!canEdit}
+          last={model.scenes[model.scenes.length - 1]?.name === scene.name}
+          onClose={() => setSceneAction(null)}
+          onSubmit={(msg) => {
+            const names = model.scenes.map((s) => s.name);
+            const i = names.indexOf(scene.name);
+            const after = names[i + 1] ?? names[i - 1];  // where to go after a delete
+            return sendEdit(msg)?.then((r) => {
+              if (r?.type === "edit.done") {
+                if (r.scene) chooseScene(r.scene);
+                else if (sceneAction === "delete" && after) chooseScene(after);
+              }
+              return r;
+            }) ?? null;
+          }} />
+      )}
+      {orderOpen && model && (
+        <RenderOrderDialog names={model.scenes.map((s) => s.name)} current={scene?.name ?? null} canEdit={canEdit}
+          onMove={(order) => sendEdit({ type: "edit.scene_order", order })} onClose={() => setOrderOpen(false)} />
+      )}
       {claude !== "never" && (
         <ClaudePanel conn={conn} open={claude === "open"} onClose={() => setClaude("closed")} ctx={{
           file: model?.file ?? file, scene: scene?.name ?? null, t: f / fps,
@@ -689,7 +753,7 @@ export function App() {
       {!file && <div className="empty">Pick a scene file to open. The studio reads it, runs it, and shows every frame; your edits go straight into the .py file.</div>}
 
       {file && (
-        <div className="main">
+        <div className={tlH != null ? "main tl-sized" : "main"} style={tlH != null ? { ["--tl-h" as string]: `${tlH}px` } : undefined}>
           <aside className="panel layers">
             <div className="tabs">
               <button className={leftTab === "layers" ? "on" : ""} onClick={() => setLeftTab("layers")}>Layers</button>
@@ -700,7 +764,8 @@ export function App() {
               <Library disabled={!canEdit} hasSelection={sel?.kind === "object"} onPick={onPick} />
             ) : (
               <>
-                {objects.length === 0 && <div className="muted">{ready ? "Nothing selectable on screen" : "…"}</div>}
+                {objects.length === 0 && <div className="muted">{!ready ? "…" : playing ? "Pause to pick objects"
+                  : objs.key !== frameKey ? "loading…" : "Nothing selectable on screen"}</div>}
                 <LayerTree objects={objects} sel={sel?.kind === "object" ? sel.obj.id : null} others={others}
                   onPick={(o, toggle) => select(o, toggle ? "toggle" : "set")} />
               </>
@@ -743,7 +808,7 @@ export function App() {
               <button onClick={() => seek(0, true)} title="Start">⏮</button>
               <button onClick={togglePlay} disabled={!ready} title={tip("play")}>{playing ? "⏸" : "▶"}</button>
               <span className="mono">{time} / {scene && !scene.pending ? scene.duration.toFixed(2) : "…"} s · frame {f}</span>
-              {scene?.target ? <span className="muted">TARGET {scene.target} s</span> : null}
+              {scene && !scene.pending && <TargetField scene={scene} canEdit={canEdit} onEdit={sendEdit} />}
               {hasSound && <button className="ghost" aria-pressed={muted} aria-label={muted ? "Sound off" : "Sound on"} onClick={() => { const m = !muted; setMuted(m); localStorageSet("studio.muted", m ? "1" : "0"); }}
                 title={muted ? "Sound off: narration is not played" : "Sound on: narration plays with the picture"}>{muted ? "🔇" : "🔊"}</button>}
               <span className="muted">{fps} fps</span>
@@ -762,10 +827,16 @@ export function App() {
           </aside>
 
           <section className="timeline-wrap">
+            <Splitter height={tlH} onHeight={setTlH} />
             {scene && !scene.pending && (
               <Timeline scene={scene} file={model!.file} rev={model!.rev} session={session} f={f} fps={fps} nFrames={nFrames}
                 sel={sel} onSeek={seek} editable={canEdit} onEdit={sendEdit}
-                onBlocked={(why) => toast("info", why)}
+                onBlocked={(why) => toast("info", why)} ripple={ripple} onRipple={setRipple}
+                onSelectObject={(id) => {
+                  const o = objects.find((x) => x.id === id);
+                  if (o) select(o);
+                  else toast("info", "Not on screen at this frame: move the playhead to where it shows");
+                }}
                 onSelectClip={(clip, anim) => setSel({ kind: "clip", clip, anim, line: scene.clips[clip]?.line,
                   text: scene.clips[clip]?.text })}
                 selectedObjectId={sel?.kind === "object" ? sel.obj.id : null}

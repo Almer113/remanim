@@ -1,4 +1,4 @@
-# reManim
+<h1><picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/wordmark-dark.svg"><img src="docs/img/wordmark.svg" alt="reManim" height="56"></picture></h1>
 
 A motion editor for [Manim Community Edition](https://www.manim.community/)
 scenes. You see the real Manim frame and a timeline of every `play()` and
@@ -7,6 +7,9 @@ written straight into the `.py` file as a small, readable edit. The file
 stays the only source of truth: edit it in your editor, or let Claude Code
 edit it, and the studio picks the change up; edit in the studio, and the
 code reads as if you had typed it.
+
+reManim is an independent tool for Manim Community Edition. It is not
+affiliated with or endorsed by the Manim Community or 3Blue1Brown.
 
 ![The studio with order_matters.py open](docs/img/studio.png)
 
@@ -55,6 +58,36 @@ because the studio is already running), it says so and stops.
 | `--app` | Open the studio in its own window (Edge or Chrome app mode) |
 | `--allow-claude-remote` | Let pages opened through an `--allow-host` name use the Claude panel. Off by default, because the panel runs Claude Code on this machine |
 | `--dev` | Let the Vite dev server (`npm run dev`, port 5173) talk to the studio, while working on the UI |
+| `--token-file PATH` | With `--allow-host`: keep the access token in this file (made if missing), so it survives restarts. The cookie then lasts 400 days instead of 7, and an installed app keeps working |
+
+### Running it all the time
+
+On this PC reManim runs permanently in the background, under the
+[Home Server Hub](../../Home%20Server%20Hub/README.md), which starts it at
+logon and can deploy, stop and restart it. Its hub entry is
+[`hub.json`](hub.json); the commands are in `scripts/serve.py`:
+
+```bash
+.venv/Scripts/python studio/scripts/serve.py start     # or stop, restart, status
+```
+
+`start` builds the UI if `web/src` is newer than the build, then starts
+the server with no window on port 8770, with
+`--allow-host your-pc.your-tailnet.ts.net --token-file studio/data/access_token`.
+The pid file, the log (`server.log`) and the token are in `studio/data/`,
+which git ignores. Restart it after changing server code.
+
+| From | Address |
+|---|---|
+| This PC | <http://localhost:8770/> |
+| Tailnet (HTTPS, through `tailscale serve --https=8770`) | <https://your-pc.your-tailnet.ts.net:8770/>. The first visit asks for the token in `studio/data/access_token`; a cookie keeps it for 400 days |
+| Home network | Not available: the server listens on 127.0.0.1 only, since opening a file runs it. Use the tailnet address, which also works at home |
+
+**Installing it as an app:** open the tailnet address (or
+`http://localhost:8770/` on this PC) in Chrome or Edge, then use the
+install button in the address bar. On an iPhone: Safari, Share, Add to Home
+Screen. The icons and the wordmark come from the logo kit in
+`Logo Builder/projects/remanim/exports/` (copied into `web/public/`).
 
 ## The screen
 
@@ -185,6 +218,8 @@ own keys, and `Esc` closes them.
 | `R` | Ripple on / off |
 | `M` | Marker at the playhead |
 | **App** | |
+| `PageUp` | Previous scene |
+| `PageDown` | Next scene |
 | `Ctrl+E` | Export video |
 | `?` | Show the keyboard shortcuts |
 <!-- keys:end -->

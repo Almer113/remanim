@@ -6,22 +6,42 @@ type Listener = (msg: any) => void;
  * (a 3D scene replays slowly; the server keeps its own deadlines). */
 const REPLY_TIMEOUT_MS = 240_000;
 
+/** How long to wait before reconnect attempt n (0 is the first): 1, 2, 4, 8,
+ * then 10 s each time. Focus or the network coming back skips the wait. */
+export function reconnectDelay(n: number): number {
+  return Math.min(10_000, 1000 * 2 ** Math.max(0, Math.floor(n)));
+}
+
 export class Conn {
   private ws: WebSocket | null = null;
   private seq = 1;
   private waiting = new Map<number, { resolve: (m: any) => void; timer: number }>();
   private listeners = new Set<Listener>();
   private queue: string[] = [];
+  private attempts = 0;  // failed connects in a row
+  private retry: number | null = null;  // the timer for the next try
+  private woken = false;
   onStatus: (up: boolean) => void = () => {};
   /** Called after every (re)connect, before queued messages are sent:
    * the server may have restarted and forgotten which files are open. */
   onOpen: () => void = () => {};
 
   connect() {
+    if (this.retry != null) { clearTimeout(this.retry); this.retry = null; }
+    if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) return;
+    if (!this.woken) {
+      // back in the window, or back on the network: try now instead of waiting out the backoff
+      this.woken = true;
+      const now = () => { if (this.retry != null) this.connect(); };
+      window.addEventListener("focus", now);
+      window.addEventListener("online", now);
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) now(); });
+    }
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     this.ws = ws;
     ws.onopen = () => {
+      this.attempts = 0;
       this.onStatus(true);
       this.onOpen();
       for (const q of this.queue.splice(0)) ws.send(q);
@@ -36,7 +56,7 @@ export class Conn {
         w.resolve({ type: "error", seq, message: "Lost the connection to the studio server; check the file and try again" });
       }
       this.waiting.clear();
-      setTimeout(() => this.connect(), 1000);
+      this.retry = window.setTimeout(() => this.connect(), reconnectDelay(this.attempts++));
     };
     ws.onmessage = (ev) => {
       let msg: any;

@@ -13,6 +13,8 @@ interface Props {
   nFrames: number;
   sel: Selection;
   selectedObjectId: string | null;
+  /** a click on an object row's name selects that object (as Layers does) */
+  onSelectObject?: (id: string) => void;
   editable: boolean;
   onSeek: (f: number, rest: boolean) => void;
   onSelectClip: (clip: number, anim: number | null) => void;
@@ -20,6 +22,9 @@ interface Props {
   /** a timeline edit (edit.shift, edit.voice, ...): file, scene and rev are added by the app */
   onEdit: (msg: object) => Promise<any> | null;
   onBlocked: (why: string) => void;
+  /** ripple: a move or retime also moves later at() calls and a literal TARGET (R toggles it) */
+  ripple: boolean;
+  onRipple: (v: boolean) => void;
 }
 
 const LABEL = 150;
@@ -57,7 +62,7 @@ export function Timeline(p: Props) {
   const [width, setWidth] = useState(800);
   const [zoom, setZoom] = useState(1);
   const [drag, setDrag] = useState<Drag | null>(null);
-  const [ripple, setRipple] = useState(true);
+  const { ripple, onRipple: setRipple } = p;
   const [picked, setPicked] = useState<Picked>({ plays: [], lines: [] });
   const [pop, setPop] = useState<Pop>(null);
   const [waves, setWaves] = useState<SoundWave[]>([]);
@@ -92,12 +97,13 @@ export function Timeline(p: Props) {
   const pps = Math.max(1e-3, ((width - LABEL - 12) / dur) * zoom);
   const x = (t: number) => LABEL + t * pps;
 
-  // snapping: clip edges, line starts, markers, the playhead, sections
+  // snapping: clip edges, line starts and ends (speech and caption), markers, the playhead, sections
   const snapPoints = useMemo(() => {
     const s: number[] = [0, dur];
     for (const c of scene.clips) { s.push(c.start, c.start + c.duration); }
     for (const v of voice) {
       s.push(v.start, v.start + v.duration);
+      if ((v.hold ?? 0) > v.duration) s.push(v.start + (v.hold ?? 0));  // its caption's end
       for (const b of v.bookmarks ?? []) s.push(b.t);
     }
     for (const m of markers) s.push(m.t);
@@ -243,6 +249,8 @@ export function Timeline(p: Props) {
 
   // R toggles ripple, M drops a marker at the playhead (when no field has focus)
   const addMarkerRef = useRef<() => void>(() => {});
+  const rippleRef = useRef<() => void>(() => {});
+  rippleRef.current = () => setRipple(!ripple);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
@@ -251,7 +259,7 @@ export function Timeline(p: Props) {
       // a dialog, or picking glyphs / editing text / camera mode: their own keys only
       if (document.querySelector(".modal-back") || document.body.hasAttribute("data-overlay")) return;
       const a = actionFor(e, false);
-      if (a === "ripple") setRipple((v) => !v);
+      if (a === "ripple") rippleRef.current();
       else if (a === "marker") addMarkerRef.current();
     };
     window.addEventListener("keydown", key);
@@ -381,16 +389,17 @@ export function Timeline(p: Props) {
               {scene.clips.map((c) => {
                 const d = drag?.kind === "trim" && drag.clip === c.index && drag.anim === null ? drag.d : c.duration;
                 const locked = lockOf(c);
-                const label = c.kind === "wait"
+                const label = c.padding ? "padding to TARGET" : c.kind === "wait"
                   ? (c.call_name === "at" ? `at → ${(c.start + d).toFixed(2)}` : `wait ${d.toFixed(2)}`)
                   : (c.anims.map((a) => a.class.replace("_MethodAnimation", ".animate")).join(" · "));
                 const pk = c.kind === "play" && picked.plays.includes(c.play_index!);
                 const target = drag?.kind === "play" && drag.reorder && drag.over === c.index;
                 return (
                   <div key={c.index}
-                    className={`clip ${c.kind} ${locked ? "locked" : ""} ${isSel(c.index, null) ? "sel" : ""} ${pk ? "picked" : ""} ${target ? (drag.after ? "drop-after" : "drop-before") : ""}`}
+                    className={`clip ${c.kind} ${c.padding ? "padding" : ""} ${locked ? "locked" : ""} ${isSel(c.index, null) ? "sel" : ""} ${pk ? "picked" : ""} ${target ? (drag.after ? "drop-after" : "drop-before") : ""}`}
                     style={{ left: x(c.start + shiftOf(c)) - LABEL, width: Math.max(3, d * pps - 2) }}
-                    title={`${c.text ?? ""}\nline ${c.line ?? "?"}${c.lock ? `\n🔒 ${c.lock}` : ""}`}
+                    title={c.padding ? `Padding to the scene's TARGET length: change it in the TARGET field under the canvas`
+                      : `${c.text ?? ""}\nline ${c.line ?? "?"}${c.lock ? `\n🔒 ${c.lock}` : ""}`}
                     onMouseDown={(e) => {
                       e.stopPropagation();
                       if (c.kind === "play" && (e.shiftKey || e.ctrlKey || e.metaKey)) { togglePick("plays", c.play_index!); return; }
@@ -399,8 +408,9 @@ export function Timeline(p: Props) {
                       if (c.kind === "play")
                         setDrag({ kind: "play", clip: c.index, x0: e.clientX, dt: 0, over: null, after: false, reorder: e.altKey, moved: false });
                     }}>
-                    {locked && <span className="lock">🔒</span>}{label}
-                    {trimHandle(c.index, null, c.duration, locked)}
+                    {locked && !c.padding && <span className="lock">🔒</span>}
+                    {c.speech && <span className="speech-warn" title={c.speech} aria-label={`Warning: ${c.speech}`}>💬</span>}{label}
+                    {trimHandle(c.index, null, c.duration, locked || !!c.duration_lock)}
                   </div>
                 );
               })}
@@ -474,7 +484,11 @@ export function Timeline(p: Props) {
 
           {scene.rows.map((row, ri) => (
             <div className={`track ${row.id && row.id === selectedObjectId ? "hi" : ""}`} key={ri}>
-              <div className="tname" title={row.id ?? ""}>{row.label}</div>
+              <div className={`tname ${row.id && p.onSelectObject ? "pick" : ""}`} title={row.id ? `Select ${row.label}` : ""}
+                role={row.id && p.onSelectObject ? "button" : undefined} tabIndex={row.id && p.onSelectObject ? 0 : undefined}
+                onClick={() => row.id && p.onSelectObject?.(row.id)}
+                onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && row.id) { e.preventDefault(); p.onSelectObject?.(row.id); } }}>
+                {row.label}</div>
               <div className="lane" onMouseDown={scrubFrom}>
                 {row.clips.map(({ clip, anim }) => {
                   const c = scene.clips[clip];
@@ -496,7 +510,8 @@ export function Timeline(p: Props) {
                         if (!locked) setDrag({ kind: "anim", clip, anim, x0: e.clientX, dt: 0, split: e.altKey, moved: false });
                       }}>
                       {a.class.replace("_MethodAnimation", ".animate")}
-                      {trimHandle(clip, multi ? anim : null, multi ? a.run_time : c.duration, locked)}
+                      {trimHandle(clip, multi ? anim : null, multi ? a.run_time : c.duration,
+                        locked || !!(multi ? c.anim_locks?.[anim] : c.duration_lock))}
                     </div>
                   );
                 })}
@@ -542,6 +557,11 @@ function PopEditor({ pop, scene, editable, onClose, onEdit }: {
   const [text, setText] = useState(v?.text ?? "");
   const [cap, setCap] = useState(v?.caption ?? "");
   const [name, setName] = useState(sec?.name ?? "");
+  // a silent scene (VOICE = None): the new line also gives it a voice, in the same edit
+  const vs = scene.voice_state;
+  const [voiceOn, setVoiceOn] = useState<"class" | "base">("class");
+  const addLine = () => text.trim() && onEdit({ type: "edit.voice", action: "add", t: (pop as { t: number }).t, value: text,
+    ...(vs?.silent ? { voice: voiceOn } : {}) });
   useEffect(() => { setText(v?.text ?? ""); setCap(v?.caption ?? ""); setName(sec?.name ?? ""); }, [v?.text, v?.caption, sec?.name]);
   const keys = (e: React.KeyboardEvent, go: () => void) => {
     if (e.key === "Escape") { e.stopPropagation(); onClose(); }
@@ -579,10 +599,23 @@ function PopEditor({ pop, scene, editable, onClose, onEdit }: {
         <>
           <div className="pop-head">New narration line at {pop.t.toFixed(2)} s <span className="muted">(self.line(...); the words go to Edge TTS)</span></div>
           <textarea rows={2} autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder="What the narrator says"
-            onKeyDown={(e) => keys(e, () => text.trim() && onEdit({ type: "edit.voice", action: "add", t: pop.t, value: text }))} />
+            onKeyDown={(e) => keys(e, addLine)} />
+          {vs?.silent && (
+            <div className="voice-ask" role="group" aria-label="This scene has no voice">
+              <div>This scene has no voice (<code>VOICE = None</code>{vs.line ? `, line ${vs.line}` : ""}).
+                {vs.owner && vs.owner !== scene.name ? " Use the house voice, en-US-AndrewNeural:" : " Adding the line gives it the house voice, en-US-AndrewNeural."}</div>
+              {vs.owner && vs.owner !== scene.name && (
+                <label><input type="radio" checked={voiceOn === "class"} onChange={() => setVoiceOn("class")} /> for {scene.name} only</label>
+              )}
+              {vs.owner && vs.owner !== scene.name && (
+                <label><input type="radio" checked={voiceOn === "base"} onChange={() => setVoiceOn("base")} /> on {vs.owner}: every
+                  scene built on it{vs.shared?.length ? ` (${vs.shared.join(", ")})` : ""}</label>
+              )}
+            </div>
+          )}
           <div className="btns-row">
             <button onClick={onClose}>Cancel</button>
-            <button className="pri" disabled={!editable || !text.trim()} onClick={() => onEdit({ type: "edit.voice", action: "add", t: pop.t, value: text })}>Add line</button>
+            <button className="pri" disabled={!editable || !text.trim()} onClick={addLine}>{vs?.silent ? "Add voice and line" : "Add line"}</button>
           </div>
         </>
       )}

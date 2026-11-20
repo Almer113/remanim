@@ -637,10 +637,22 @@ def plan_delete_clip(src: Source, scene: str, clip: dict, anim: int | None) -> P
 
 
 # -- a new scene file -------------------------------------------------------------------------
-def new_file_text(scene: str = "NewScene", target: float = 5.0) -> str:
-    """The §6 template: a TimedScene with a length to drop things into."""
+HOUSE_VOICE = "en-US-AndrewNeural"
+
+
+def new_file_text(scene: str = "NewScene", target: float | None = 5.0, voice: bool = False) -> str:
+    """The §6 template: a TimedScene with a length to drop things into.
+
+    `voice`: narrated with the house voice (else VOICE = None, silent);
+    `target`: None for no TARGET line (the scene is as long as its content)."""
     if not scene.isidentifier() or keyword.iskeyword(scene):
         raise EditError(f"not a class name: {scene!r}")
+    if target is not None and not (isinstance(target, (int, float)) and 0 < target <= 3600):
+        raise EditError(f"a length in seconds, more than 0: {target!r}")
+    voice_line = (f'    VOICE = "{HOUSE_VOICE}"  # the house voice; None for a silent scene\n' if voice
+                  else "    VOICE = None  # set a voice to narrate\n")
+    target_line = ("" if target is None
+                   else f"    TARGET = {fmt(target, '1.0')}  # seconds; the scene is padded to this length\n")
     return (
         "from manim import *\n"
         "from manim_kit import *\n"
@@ -648,8 +660,7 @@ def new_file_text(scene: str = "NewScene", target: float = 5.0) -> str:
         "\n"
         "\n"
         f"class {scene}(TimedScene):\n"
-        "    VOICE = None  # set a voice to narrate\n"
-        f"    TARGET = {fmt(target, '1.0')}  # seconds; the scene is padded to this length\n"
+        + voice_line + target_line +
         "\n"
         "    def construct(self):\n"
         "        apply_background()\n"

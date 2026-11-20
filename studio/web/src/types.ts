@@ -31,6 +31,13 @@ export interface Clip {
   transforms?: ({ kind: string; source: string; target: string; kinds: string[] } | null)[];
   /** ordinal among the scene's play() clips (what timeline edits name) */
   play_index?: number;
+  /** the wait that pads a TimedScene to its TARGET (not content) */
+  padding?: boolean;
+  /** why the length can't be edited (computed in the code), known before trying (Phase 7 step 8) */
+  duration_lock?: string;
+  anim_locks?: (string | null)[];
+  /** it takes things away while a narration line is still being spoken (a warning) */
+  speech?: string;
   tier: number;
   text: string | null;
 }
@@ -49,6 +56,11 @@ export interface SceneModel {
   error: { message: string; line: number | null } | null;
   bases: string[];
   target: number | null;
+  /** the TARGET field (Phase 7 step 4) */
+  target_info?: { value: number | null; own: boolean; line: number | null; computed: string | null;
+                  content_end: number; editable: boolean };
+  /** VOICE (Phase 7 step 5): silent when it is None; who sets it; the scenes a base's None also silences */
+  voice_state?: { silent: boolean; owner: string | null; line: number | null; shared?: string[] } | null;
   clips: Clip[];
   rows: Row[];
   frames: number;
@@ -155,6 +167,9 @@ export interface Obj {
   /** A curve drawn from a lambda: its formula (Phase 5 step 7). */
   curve?: { params: string[]; expr: string; span: Span };
   updaters?: number;
+  /** the literal .scale() / .rotate() (degrees) chained on the call that makes it (Phase 7 step 9) */
+  scale_now?: number;
+  turn_now?: number;
 }
 
 /** A text's glyphs and the source characters behind each (GET /glyphs). */

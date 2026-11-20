@@ -846,3 +846,31 @@ def rotate_candidates(src: Source, obj: dict, deg: float) -> list[Candidate]:
         mv = P["rotate"]
     return _for(src, obj, P, mv, "rotate", lambda s, x: plan_rotate_on(s, x, deg), "rotate",
                 degrees_text(deg), "rotates")
+
+
+# -- what the Inspector shows as scale and turn (Phase 7 step 9) ---------------------------
+def chained_transform(src: Source, call: ast.Call) -> tuple[float, float] | None:
+    """The scale factor and turn (degrees) that literal `.scale(k)` /
+    `.rotate(a)` calls chained on `call` give it: `Square().scale(1.3)` reads
+    1.3. None when a factor in the chain is computed (no honest number)."""
+    k, deg = 1.0, 0.0
+    node = call
+    while True:
+        attr = src.parent(node)
+        if not (isinstance(attr, ast.Attribute) and attr.value is node):
+            break
+        nxt = src.parent(attr)
+        if not (isinstance(nxt, ast.Call) and nxt.func is attr):
+            break
+        if attr.attr == "scale":
+            v = number_of(nxt.args[0]) if nxt.args else None
+            if v is None:
+                return None
+            k *= v
+        elif attr.attr == "rotate":
+            a = eval_angle(nxt.args[0]) if nxt.args else None
+            if a is None:
+                return None
+            deg += math.degrees(a)
+        node = nxt
+    return round(k, 4), round(deg, 2)

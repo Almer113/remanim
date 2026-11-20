@@ -23,3 +23,6 @@ studio/spikes/tmp/
 studio/web/node_modules/
 studio/web/dist/
 studio/tests/tmp/
+
+# reManim server state (pid, log, access token)
+studio/data/

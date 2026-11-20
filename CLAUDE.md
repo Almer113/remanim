@@ -62,8 +62,13 @@ pane, not VS Code.
   `studio/PLAN.md`; read it before any studio work. It is separate from
   `preview_server.py`, shares no code with the videos, and nothing in it may
   break the preview or the check tools. `README.md` maps the whole folder.
-  Run it with launch config `remanim` (port 8770; rebuild the UI with
-  `npm run build` in `studio/web` after changing it). Tests:
+  It runs permanently on port 8770 under the Home Server Hub
+  (`studio/scripts/serve.py start|stop|restart|status`; see "Running it
+  all the time" in `studio/README.md`). Open it in the pane with launch
+  config `remanim-deployed`; after changing server code, run
+  `serve.py restart`. Launch config `remanim` only works while the
+  deployed one is stopped (same port). Rebuild the UI with
+  `npm run build` in `studio/web` after changing it. Tests:
   `.venv/Scripts/python -m pytest -q studio/tests`; full corpus:
   `studio/tests/corpus_run.py`. Its workers share `media/Tex_studio`, so
   don't run studio tests while the studio server is busy.

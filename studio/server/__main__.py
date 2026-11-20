@@ -80,6 +80,25 @@ def open_app_window(url: str, background: bool = True):
         go()
 
 
+def access_token(path: str | None) -> str:
+    """A new token, or the one kept in `path` (written there the first time).
+    A token of your own choosing can be put in the file; at least 8 characters."""
+    import secrets
+    if path:
+        f = Path(path)
+        try:
+            t = f.read_text(encoding="ascii").strip()
+            if len(t) >= 8:
+                return t
+        except (OSError, UnicodeDecodeError):
+            pass
+        t = secrets.token_urlsafe(24)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(t, encoding="ascii")
+        return t
+    return secrets.token_urlsafe(24)
+
+
 def main():
     ap = argparse.ArgumentParser(prog="python -m studio.server")
     ap.add_argument("--port", type=int, default=8770)
@@ -90,6 +109,9 @@ def main():
     ap.add_argument("--allow-claude-remote", action="store_true",
                     help="let pages opened through an --allow-host name use the Claude panel "
                          "(it runs Claude Code on this machine); off by default")
+    ap.add_argument("--token-file", metavar="PATH",
+                    help="with --allow-host: keep the access token in this file (made if missing), so "
+                         "it, the browsers' cookies and installed apps survive restarts")
     ap.add_argument("--app", action="store_true",
                     help="open the studio in its own window (Edge or Chrome in app mode)")
     ap.add_argument("--dev", action="store_true",
@@ -113,8 +135,9 @@ def main():
         print(f"Note: {note}", flush=True)
     print(f"reManim on http://127.0.0.1:{args.port}", flush=True)
     if app.TRUSTED_HOSTS:
-        import secrets
-        app.ACCESS_TOKEN = secrets.token_urlsafe(24)
+        app.ACCESS_TOKEN = access_token(args.token_file)
+        if args.token_file:
+            app.TOKEN_DAYS = 400  # the longest a browser keeps a cookie
         for h in sorted(app.TRUSTED_HOSTS):
             print(f"  from other machines: https://{h}:{args.port}/?token={app.ACCESS_TOKEN}", flush=True)
     if args.app:

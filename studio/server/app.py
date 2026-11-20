@@ -9,6 +9,7 @@ import re
 import json
 import os
 import threading
+import time
 import warnings
 from pathlib import Path
 
@@ -38,6 +39,28 @@ ACCESS_TOKEN = ""
 # may use it only when the server was started with --allow-claude-remote
 CLAUDE_REMOTE = False
 TOKEN_COOKIE = "studio_token"
+# how long the cookie lasts: a week for a token made at start-up; with --token-file
+# the token outlives restarts, so the cookie can too (an installed app keeps working)
+TOKEN_DAYS = 7
+# what a browser fetches to install the page as an app: no secrets in them, and
+# the manifest is fetched without cookies, so they need no token
+INSTALL_FILES = {"/manifest.webmanifest", "/favicon.ico"}
+INSTALL_ICON = re.compile(r"/icons/[A-Za-z0-9_-]+\.(png|svg|webp)")  # one file, no "..", no folders
+STARTED = time.time()
+TOKEN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>reManim</title>
+<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#1c1f26">
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#15171c;color:#e6e8eb;font:15px system-ui,sans-serif}form{width:min(360px,100% - 32px)}
+img{width:64px;height:64px;border-radius:14px}input,button{font:inherit;width:100%;box-sizing:border-box;
+margin-top:8px;padding:8px 10px;border-radius:6px;border:1px solid #2f343e;background:#23272f;color:#e6e8eb}
+button{background:#3b8cff;border-color:#3b8cff;color:#fff}p{color:#8b929b;line-height:1.4}</style></head>
+<body><form method="get" action="/"><img src="/icons/icon-192.png" alt=""><h2><img src="/icons/wordmark-dark.svg" alt="reManim" height="40"></h2>
+<p>From another device, reManim needs its access token once. It is in
+<code>studio/data/access_token</code> on the PC, and in the link the server printed at start-up.</p>
+<input name="token" type="password" autocomplete="current-password" placeholder="Access token" required autofocus>
+<button type="submit">Open</button></form></body></html>"""
 
 
 def _known_host(name: str) -> bool:
@@ -83,12 +106,17 @@ async def local_only(req: web.Request, handler):
     if not _known_host(name):
         raise web.HTTPForbidden(text="the studio only answers on localhost")
     set_cookie = False
-    if not is_local(req):
+    install = req.method == "GET" and (req.path in INSTALL_FILES or INSTALL_ICON.fullmatch(req.path))
+    if not is_local(req) and not install:
         # another machine (a tailnet name): only with the start-up link's token
         given = req.cookies.get(TOKEN_COOKIE) or ""
         if not (ACCESS_TOKEN and hmac.compare_digest(given, ACCESS_TOKEN)):
             q = req.query.get("token", "")
             if not (ACCESS_TOKEN and q and hmac.compare_digest(q, ACCESS_TOKEN)):
+                if req.method == "GET" and req.path == "/":
+                    # a page a person (or an installed app) can get past: paste the token once
+                    return web.Response(status=403, text=TOKEN_PAGE, content_type="text/html",
+                                        headers={"Cache-Control": "no-store"})
                 raise web.HTTPForbidden(text="open the link the studio printed when it started (it carries a token)")
             set_cookie = True
     origin = req.headers.get("Origin")
@@ -101,7 +129,7 @@ async def local_only(req: web.Request, handler):
         # drop the token from the address bar; the cookie carries it from here on
         resp = web.HTTPFound(req.rel_url.with_query({k: v for k, v in req.query.items() if k != "token"}))
         resp.set_cookie(TOKEN_COOKIE, ACCESS_TOKEN, httponly=True, secure=True, samesite="Strict",
-                        max_age=7 * 24 * 3600)
+                        max_age=TOKEN_DAYS * 24 * 3600)
         raise resp
     return await handler(req)
 
@@ -479,10 +507,11 @@ async def new_file(msg: dict) -> dict:
         # circle.py must not define `class Circle`: the next Circle dropped in would make the scene
         scene += "Scene"
     try:
-        text = new_file_text(scene)
+        target = msg.get("target", 5.0)  # null: no TARGET line
+        text = new_file_text(scene, target=None if target is None else float(target), voice=bool(msg.get("voice")))
         path.parent.mkdir(parents=True, exist_ok=True)
         write_atomic(path, text.encode("utf-8"))
-    except (EditError, OSError) as e:
+    except (EditError, OSError, TypeError, ValueError) as e:
         return {"type": "error", "message": str(e)}
     return {"type": "file.created", "file": rel(path), "scene": scene}
 
@@ -522,6 +551,7 @@ async def handle(msg: dict) -> dict | None:
              "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip",
              "edit.voice", "edit.shift", "edit.offset", "edit.merge", "edit.split", "edit.reorder",
              "edit.scene_order", "edit.section", "edit.literal",
+             "edit.scene_add", "edit.scene_delete", "edit.scene_rename", "edit.target",
              "edit.part_colour", "edit.curve",
              "edit.transform_kind", "edit.match_parts", "edit.camera"):
         return await doc.edit(msg)
@@ -572,6 +602,22 @@ async def index(req):
     return web.FileResponse(p, headers={"Cache-Control": "no-cache"})
 
 
+async def health(req):
+    """For the Home Server Hub: cheap, changes nothing, says which process this is."""
+    return web.json_response({"ok": True, "app": "remanim", "pid": os.getpid(),
+                              "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(STARTED))})
+
+
+async def install_file(req):
+    """The web app manifest and its icons (built into dist from web/public)."""
+    name = req.path.lstrip("/")  # manifest.webmanifest, favicon.ico, icons/<name>
+    p = (WEB / name).resolve()
+    if WEB.resolve() not in p.parents or not p.is_file():
+        raise web.HTTPNotFound()
+    ctype = "application/manifest+json" if p.suffix == ".webmanifest" else None
+    return web.FileResponse(p, headers={"Cache-Control": "no-cache", **({"Content-Type": ctype} if ctype else {})})
+
+
 async def on_startup(app):
     hub.loop = asyncio.get_running_loop()
     hub.start_watching()
@@ -594,6 +640,10 @@ def make_app() -> web.Application:
     app.router.add_get("/", index)
     app.router.add_get("/api/files", files)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/health", health)
+    app.router.add_get("/manifest.webmanifest", install_file)
+    app.router.add_get("/favicon.ico", install_file)
+    app.router.add_get(r"/icons/{name:[A-Za-z0-9_-]+\.(?:png|svg|webp)}", install_file)
     app.router.add_get("/frame", frame)
     app.router.add_get("/objects", objects)
     app.router.add_get("/idmap", idmap)

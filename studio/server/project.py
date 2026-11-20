@@ -26,10 +26,12 @@ from .code import tex as texplan
 from .code import graphs as graphplan
 from .code import transforms as transformplan
 from .code import camera as cameraplan
+from .code import scenes
 from .code import timeline
 from .code.census import classify, summary
 from .code.source import Source, Span
 from .code.splice import Edit, EditError, apply, number_of, write_atomic
+from .code.splice import fmt as fmt_num
 from . import tracecache
 from .host import WorkerHandle
 
@@ -94,6 +96,62 @@ def _timings(trace: dict) -> list:
             for e in trace.get("events") or []]
 
 
+def content_end(tr: dict) -> float:
+    """When the scene's own content ends: its last play() / wait() made from
+    the scene file, or the last narration line (spoken, or its caption held),
+    whichever is later. Padding to TARGET is not content."""
+    end = 0.0
+    for e in tr.get("events") or []:
+        if e.get("call") is not None:
+            end = max(end, e["start"] + e["duration"])
+    for ln in (tr.get("audio") or {}).get("lines", []):
+        end = max(end, ln["start"] + max(ln.get("duration") or 0.0, ln.get("hold") or 0.0))
+    return round(end, 4)
+
+
+# animations that take things off the screen (Phase 7 step 6)
+REMOVERS = {"FadeOut", "Uncreate", "Unwrite", "ShrinkToCenter", "FadeOutAndShift"}
+SPEECH_GRACE = 0.5  # s into a line before a fade counts as mid-sentence
+
+
+def speech_warnings(tr: dict | None) -> dict[int, str]:
+    """Event index → a warning, for animations that take things away while a
+    narration line is still being spoken: they start during the line and end
+    before it does. Warnings only: some fades over speech are deliberate."""
+    out: dict[int, str] = {}
+    if not tr:
+        return out
+    lines = [(ln["start"], ln["start"] + (ln.get("duration") or 0.0), ln.get("text") or "")
+             for ln in (tr.get("audio") or {}).get("lines", []) if ln.get("duration")]
+    events = tr.get("events") or []
+    # when each object was first brought on by an animation; objects never animated
+    # in (self.add) count as there from the start
+    first: dict[str, float] = {}
+    for ev in events:
+        for a in ev.get("anims") or []:
+            if a.get("mobject") and a.get("class") not in REMOVERS:
+                first.setdefault(a["mobject"], ev["start"])
+    for i, ev in enumerate(events):
+        if ev.get("kind") != "play":
+            continue
+        rm = [a for a in ev.get("anims") or [] if a.get("class") in REMOVERS]
+        if not rm:
+            continue
+        s, e = ev["start"], ev["start"] + ev["duration"]
+        for ls, le, text in lines:
+            # something brought in during this line and taken away again is a
+            # pointer for the words (an arrow, a label): only older things count
+            # and a fade in the line's first half second clears the stage for what it
+            # says (a title going as the next part starts): only fades later in it count
+            gone = sorted({a["class"] for a in rm if first.get(a.get("mobject"), -1.0) < ls - 1e-3})
+            if gone and ls + SPEECH_GRACE <= s < le and e < le - 0.05:
+                words = text if len(text) <= 32 else text[:30].rstrip() + "…"
+                out[i] = (f"{'/'.join(gone)} ends {le - e:.1f} s before the line \u201c{words}\u201d does "
+                          f"(at {le:.2f} s): things leave mid-sentence")
+                break
+    return out
+
+
 def _stop_reason(err: dict) -> str:
     """Why an edited scene was refused, with a hint for errors whose cause
     is in the scene rather than in the edit."""
@@ -150,6 +208,10 @@ class Document:
         self.redo: list[UndoStep] = []
         self.pending: dict[str, Pending] = {}
         self.frames = FrameCache()
+        # revisions with the same content (bytes, imported modules, quality) draw the
+        # same frames: an undo finds the earlier revision's frames (Phase 7 step 13)
+        self._content_rev: dict[tuple, int] = {}
+        self._same_as: dict[int, int] = {}
         self.active: str | None = None
         self.edit_lock = asyncio.Lock()
         self.load_lock = asyncio.Lock()
@@ -233,6 +295,7 @@ class Document:
             # unknown, so nothing is cached, and the engine restarts with the new one
             self._deps_digest = self._deps_seen = None
             asyncio.get_running_loop().create_task(self.deps_changed())
+        self._file_content(data)
         order = list(r["scenes"])
         if self.active in order:
             order.remove(self.active)
@@ -347,7 +410,7 @@ class Document:
                 if tr is None:
                     return
                 n = self.frame_count(scene)
-                todo = [f for f in range(n) if self.frames.get((rev, scene, f, "half", "jpeg")) is None
+                todo = [f for f in range(n) if self._cached((rev, scene, f, "half", "jpeg")) is None
                         and (rev, scene, f) not in failed]
                 if not todo:
                     return
@@ -389,7 +452,7 @@ class Document:
             return {"error": {"message": self._cant_draw, "code": "not_loaded"}}
         f = max(0, min(int(f), self.frame_count(scene) - 1))  # Manim never renders outside the scene
         key = (self.rev, scene, f, size, fmt)
-        hit = self.frames.get(key)
+        hit = self._cached(key, want=(lambda v: "idmap" in v) if ids else None)
         if hit is not None and (not ids or "idmap" in hit):
             return hit
         r = await self._engine({"op": "frame", "scene": scene, "f": f, "ids": ids,
@@ -414,7 +477,7 @@ class Document:
             return never
         f = max(0, min(int(f), self.frame_count(scene) - 1))
         key = (self.rev, scene, f, "glyphs", oid)
-        hit = self.frames.get(key)
+        hit = self._cached(key)
         if hit is not None:
             return hit
         r = await self._engine({"op": "frame", "scene": scene, "f": f, "ids": oid,
@@ -490,6 +553,24 @@ class Document:
             curve = graphplan.describe_curve(self.src, site)
             if curve is not None and self.tier_at(site[0]) <= 2:
                 o["curve"] = curve
+        # the scale and turn chained on the call that makes it (or on this call of
+        # the helper that makes it): what the Inspector shows (Phase 7 step 9)
+        # an object made by a helper: the helper's own call, and this call of the
+        # helper (where the studio chains its edits) both count
+        spans = []
+        for sp in [o.get("site"), o.get("user_site")] + list(o.get("chain_spans") or []):
+            if sp and list(sp) not in spans:
+                spans.append(list(sp))
+        k, deg, known = 1.0, 0.0, bool(spans)
+        for sp in spans:
+            c = self.src.find_call(Span(*sp))
+            st = moveplan.chained_transform(self.src, c) if c is not None else (1.0, 0.0)
+            if st is None:
+                known = False
+                break
+            k, deg = k * st[0], deg + st[1]
+        if known:
+            o["scale_now"], o["turn_now"] = round(k, 4), round(deg, 2)
         if o.get("site"):
             call = self.src.find_call(Span(*o["site"]))
             if call is not None:
@@ -637,13 +718,19 @@ class Document:
 
     def _scene_model(self, tr: dict) -> dict:
         clips, rows = [], OrderedDict()
+        speech = speech_warnings(tr)
         n_play = 0
         seen_calls: dict = {}  # pass of a loop: how many earlier events the same call made
         for i, ev in enumerate(tr["events"]):
             call = self.src.find_call(Span(*ev["call"])) if ev.get("call") and self.src.ok else None
             name = Source.call_name(call) if call is not None else None
             lock = None
-            if ev.get("in_helper"):
+            padding = ev.get("call") is None and ev["kind"] == "wait" and i == len(tr["events"]) - 1 \
+                and bool(tr.get("target"))
+            if padding:
+                tl = self._target_line(tr)
+                lock = "padding to TARGET" + (f" (line {tl})" if tl else "") + ": change the scene's length instead"
+            elif ev.get("in_helper"):
                 lock = f"inside {ev.get('func')}() — editing it would change every use"
             elif name not in ("play", "wait", "at"):
                 lock = f"timed by {name or 'library code'}() (line {ev.get('call_line')})"
@@ -664,6 +751,14 @@ class Document:
                     "anims": ev["anims"], "anim_runtimes": runtimes,
                     "tier": self.tier_at(ev["call_line"]) if ev.get("call_line") else 3,
                     "text": self.src.text(call)[:200] if call is not None else None}
+            if padding:
+                clip["padding"] = True
+            if not lock and call is not None and ev["kind"] in ("play", "wait"):
+                # a length the code computes (at(1.2 + 2.4 * k), run_time=t): say so up
+                # front, so the field shows read-only instead of refusing after Enter
+                clip.update(self._timing_locks(clip))
+            if i in speech:
+                clip["speech"] = speech[i]
             if name == "play" and call is not None and Source.keyword(call, "run_time") is not None:
                 clip["play_runtime"] = True
             if name == "play" and call is not None and not lock:
@@ -687,9 +782,142 @@ class Document:
         timed = tr.get("timed", "TimedScene" in (tr.get("bases") or []))
         return {"name": tr["name"], "duration": tr["duration"], "error": tr.get("error"),
                 "bases": tr.get("bases", []), "target": tr.get("target"), "clips": clips,
+                "target_info": self._target_info(tr, timed),
+                "voice_state": self._voice_state(tr["name"]) if timed else None,
                 "rows": list(rows.values()), "frames": self.frame_count(tr["name"]), "timed": timed,
                 "ambient": self._ambient(tr["name"]),
                 **self._audio_model(tr, timed)}
+
+    def _timing_locks(self, clip: dict) -> dict:
+        """Why a clip's length (and each animation's run_time) can't be edited,
+        found by planning a retime without writing it (Phase 7 step 8)."""
+        out: dict = {}
+
+        def why(c: dict) -> str | None:
+            try:
+                planner.plan_timing(self.src, c, "duration", round(c["duration"] + 0.5, 4))
+            except EditError as e:
+                return str(e)
+            except Exception:  # noqa: BLE001 - a planner bug must not break the model
+                return None
+            return None
+        w = why(clip)
+        if w:
+            out["duration_lock"] = w
+        if clip["kind"] == "play" and len(clip["anims"]) > 1:
+            locks = [why(dict(clip, kind="anim", anim_index=k, duration=a.get("run_time") or clip["duration"]))
+                     for k, a in enumerate(clip["anims"])]
+            if any(locks):
+                out["anim_locks"] = locks
+        return out
+
+    def _voice_state(self, scene: str) -> dict | None:
+        """Is the scene silent (VOICE = None), and who says so (Phase 7 step 5)."""
+        if not self.src.ok:
+            return None
+        try:
+            vs = timeline.voice_state(self.src, scene)
+        except EditError:
+            return None
+        if vs["silent"] and vs["owner"] != scene:
+            # the scenes in this file that the base's VOICE = None also silences
+            vs["shared"] = sorted(n for n in self.meta.get("scenes", [])
+                                  if timeline.voice_state(self.src, n).get("owner") == vs["owner"])
+        return vs
+
+    def _target_line(self, tr: dict) -> int | None:
+        """The line that sets the scene's TARGET: its own, or a base class's in this file."""
+        if not self.src.ok:
+            return None
+        for cls in timeline.class_chain(self.src, tr["name"]):
+            st = timeline._setting(cls, "TARGET")
+            if st is not None:
+                return st.lineno
+        return None
+
+    def _target_info(self, tr: dict, timed: bool) -> dict:
+        """The scene's length as the TARGET field shows it (Phase 7 step 4)."""
+        own = None
+        if self.src.ok:
+            try:
+                own = timeline.target_stmt(self.src, tr["name"])
+            except EditError:
+                pass
+        computed = None
+        if own is not None and number_of(own.value) is None:
+            computed = f"TARGET is computed ({self.src.text(own.value)}); change it in the code"
+        return {"value": tr.get("target"), "own": own is not None, "line": self._target_line(tr),
+                "computed": computed, "content_end": content_end(tr), "editable": timed and not computed}
+
+    async def _target_edit(self, scene: str, tr: dict, msg: dict) -> dict:
+        """Set TARGET to a length, or "fit": the content's end + 0.1 s."""
+        if not tr.get("timed", "TimedScene" in (tr.get("bases") or [])):
+            return {"type": "edit.refused", "reason": "only a TimedScene pads itself to a TARGET length"}
+        fps = self.meta.get("fps", 15)
+        end = content_end(tr)
+        v = msg.get("value")
+        try:
+            if v == "fit":
+                value = math.ceil((end + 0.1) * 100 - 1e-6) / 100
+            else:
+                value = float(v)
+                if not math.isfinite(value):
+                    raise ValueError
+            if value < end - 0.5 / fps:
+                raise EditError(f"the scene's content runs to {end:.2f} s; a TARGET shorter than that "
+                                "doesn't cut it (shorten the content first)")
+            plan = timeline.plan_target(self.src, scene, value)
+        except (TypeError, ValueError):
+            return {"type": "edit.refused", "reason": f"not a length: {v!r}"}
+        except EditError as e:
+            return {"type": "edit.refused", "reason": str(e)}
+        new = apply(self.data, plan.edits)
+        if not Source(new).ok:
+            return {"type": "edit.refused", "reason": "the edit would not parse"}
+        r = await self._engine({"op": "verify", "data": new, "scene": scene})
+        if "error" in r:
+            return {"type": "edit.refused", "reason": f"the edited scene doesn't run: {r['error']['message']}"}
+        after = r["trace"]
+        if after.get("error"):
+            return {"type": "edit.refused", "reason": _stop_reason(after["error"])}
+        if abs(after["duration"] - value) > 1.5 / fps:
+            return {"type": "edit.refused", "reason": f"the scene lasts {after['duration']:.2f} s after the edit, "
+                                                      f"not {value:g} s"}
+        note = plan.note + (" (fit: content ends at %.2f s)" % end if v == "fit" else "")
+        return await self._write_verified(new, note)
+
+    async def _ripple_target(self, scene: str, new: bytes, after: dict, note: str) -> tuple[bytes, str]:
+        """After a retime with ripple on: a literal TARGET follows the content's
+        end, so the padding after it stays as it was. Verified by replay; left
+        alone when that fails."""
+        before = self.traces.get(scene) or {}
+        if not before.get("target") or after.get("error"):
+            return new, note
+        fps = self.meta.get("fps", 15)
+        d = content_end(after) - content_end(before)
+        if abs(d) < 0.5 / fps:
+            return new, note
+        src = Source(new)
+        try:
+            st = timeline.target_stmt(src, scene)
+        except EditError:
+            return new, note
+        old = number_of(st.value) if st is not None else None
+        if old is None:
+            return new, note
+        value = round(old + d, 2)
+        if value < content_end(after) - 0.5 / fps:
+            return new, note
+        try:
+            plan = timeline.plan_target(src, scene, value)
+        except EditError:
+            return new, note
+        new2 = apply(new, plan.edits)
+        r = await self._engine({"op": "verify", "data": new2, "scene": scene})
+        tr2 = r.get("trace") if "error" not in r else None
+        if tr2 is None or tr2.get("error") or abs(tr2["duration"] - value) > 1.5 / fps:
+            return new, note
+        return new2, note + f" · ripple: TARGET {fmt_num(old)} → {fmt_num(value)}"
 
     def _ambient(self, scene: str) -> list[dict]:
         """`self.begin_ambient_camera_rotation(rate=0.1)` in the scene (step 10):
@@ -803,6 +1031,13 @@ class Document:
         if self.error:
             return {"type": "edit.refused", "reason": "the file doesn't run; fix it first (the studio is showing "
                                                       "the last version that ran)"}
+        if msg["type"] in SCENE_EDITS:
+            return await self._scene_edit(msg)
+        if msg["type"] == "edit.target":
+            tr0 = self.traces.get(msg.get("scene"))
+            if tr0 is None or tr0.get("error"):
+                return {"type": "edit.refused", "reason": "that scene isn't traced (or stops with an error)"}
+            return await self._target_edit(msg["scene"], tr0, msg)
         scene = msg.get("scene")
         tr = self.traces.get(scene)
         if tr is None and msg["type"] == "edit.scene_order":
@@ -831,7 +1066,8 @@ class Document:
                     c["default_rate_func"] = clip["anims"][0]["default_rate_func"]
                 plan = planner.plan_timing(self.src, c, msg["field"], msg["value"])
                 target = {"kind": "timing", "clip": msg["clip"], "anim": msg.get("anim"),
-                          "field": msg["field"], "value": msg["value"]}
+                          "field": msg["field"], "value": msg["value"],
+                          "ripple": bool(msg.get("ripple")) and msg["field"] == "duration"}
             elif msg["type"] in ("edit.move", "edit.scale", "edit.rotate"):
                 return await self._transform(scene, tr, msg)
             elif msg["type"] in STRUCTURAL:
@@ -1059,9 +1295,53 @@ class Document:
         why = self._check(target, r)
         if why:
             return {"type": "edit.refused", "reason": why}
+        if target.get("ripple") and isinstance(r.get("trace"), dict):
+            new, note = await self._ripple_target(scene, new, r["trace"], note)
         return await self._write_verified(new, note)
 
+    async def _scene_edit(self, msg: dict) -> dict:
+        """Add, delete or rename a scene class (Phase 7 step 3). Verified by
+        tracing: the new scene runs; the renamed one times out as before;
+        after a delete, another scene still runs."""
+        kind, scene = msg["type"], msg.get("scene")
+        defined = list(self.meta.get("scenes", []))
+        tr = self.traces.get(scene)
+        if tr is None:
+            return {"type": "edit.refused", "reason": "that scene is still being traced; try again in a moment"}
+        try:
+            if kind == "edit.scene_add":
+                plan = scenes.plan_scene_add(self.src, scene, msg.get("name"), msg.get("where", "after"),
+                                             defined, self.api)
+                check = plan.checks["new_scene"]
+            elif kind == "edit.scene_rename":
+                plan = scenes.plan_scene_rename(self.src, scene, msg.get("name"), defined, self.api)
+                check = plan.checks["renamed"][1]
+            else:
+                plan = scenes.plan_scene_delete(self.src, scene, defined)
+                check = next((n for n in defined if n != scene and not (self.traces.get(n) or {}).get("error")),
+                             None)
+                if check is None:
+                    raise EditError("no other scene runs, so the delete can't be checked")
+        except EditError as e:
+            return {"type": "edit.refused", "reason": str(e)}
+        new = apply(self.data, plan.edits)
+        if not Source(new).ok:
+            return {"type": "edit.refused", "reason": "the edit would not parse"}
+        r = await self._engine({"op": "verify", "data": new, "scene": check})
+        if "error" in r:
+            return {"type": "edit.refused", "reason": f"the edited file doesn't run: {r['error']['message']}"}
+        after = r["trace"]
+        if after.get("error"):
+            return {"type": "edit.refused", "reason": _stop_reason(after["error"])}
+        if kind == "edit.scene_rename" and not tr.get("error") and _timings(after) != _timings(tr):
+            return {"type": "edit.refused", "reason": "the renamed scene doesn't time out as before"}
+        out = await self._write_verified(new, plan.note)
+        if out.get("type") == "edit.done":
+            out["scene"] = None if kind == "edit.scene_delete" else check
+        return out
+
     async def _write_verified(self, new: bytes, note: str) -> dict:
+        warned = set(speech_warnings(self.traces.get(self.active)).values())
         before = self.data
         diff = self.diff(new)
         why = self._write(new)
@@ -1071,7 +1351,11 @@ class Document:
         self.redo.clear()
         await self._reload_for_reply()
         self._seed_frame(new)
-        return {"type": "edit.done", "summary": note, "diff": diff, "rev": self.rev}
+        out = {"type": "edit.done", "summary": note, "diff": diff, "rev": self.rev}
+        fresh = [w for w in speech_warnings(self.traces.get(self.active)).values() if w not in warned]
+        if fresh:
+            out["warning"] = fresh[0] + (f" (and {len(fresh) - 1} more)" if len(fresh) > 1 else "")
+        return out
 
     # -- canvas edits: move, scale, rotate (code_spec §4.1, §4.2) ------------------------
     async def _transform(self, scene: str, tr: dict, msg: dict) -> dict:
@@ -1086,7 +1370,10 @@ class Document:
             return {"type": "edit.refused", "reason": why}
         try:
             if kind == "move":
-                dx, dy = round(float(msg["dx"]), 4), round(float(msg["dy"]), 4)
+                # drags and nudges are written to 2 decimals (0.01 units ≈ 1.4 px at
+                # 1080p); a value typed in the Inspector keeps what was typed (step 9)
+                nd = 4 if msg.get("exact") else 2
+                dx, dy = round(float(msg["dx"]), nd), round(float(msg["dy"]), nd)
                 if not (math.isfinite(dx) and math.isfinite(dy)):
                     raise EditError("not a distance")
                 if abs(dx) < 1e-4 and abs(dy) < 1e-4:
@@ -1312,6 +1599,12 @@ class Document:
                 elif act == "add":
                     plan = timeline.plan_voice_add(src, scene, events, fps, timed, num(msg.get("t"), "time"),
                                                    msg.get("value"))
+                    if msg.get("voice") in ("class", "base"):
+                        # a silent scene: the voice and the line in one edit, one undo step
+                        pv = timeline.plan_set_voice(src, scene, msg["voice"])
+                        plan = timeline.Plan(pv.edits + plan.edits, pv.note + "; " + plan.note, checks=plan.checks)
+                    elif timeline.voice_state(src, scene)["silent"]:
+                        raise EditError("this scene has no voice (VOICE = None); choose one first")
                 elif act == "delete":
                     plan = timeline.plan_voice_delete(src, scene, line_at(msg.get("line")))
                 else:
@@ -1426,6 +1719,32 @@ class Document:
                 return (f"it is animating here (the play() at line {ev.get('call_line')}); "
                         "move the playhead to a still moment or the end of the animation")
         return None
+
+    def _file_content(self, data: bytes):
+        """File this revision under its content; remember the last earlier
+        revision with the same content, whose frames are this one's too."""
+        if not self._deps_digest or getattr(self, "_no_cache", False):
+            return
+        c = (hashlib.sha256(data).digest(), self._deps_digest, self.worker.quality)
+        prev = self._content_rev.get(c)
+        if prev is not None and prev != self.rev:
+            self._same_as[self.rev] = prev
+        self._content_rev[c] = self.rev
+
+    def _cached(self, key: tuple, want=None):
+        """A cached frame for key, or for the same frame of an earlier revision
+        with the same content (copied under this revision's key)."""
+        hit = self.frames.get(key)
+        if hit is not None and (want is None or want(hit)):
+            return hit
+        rev, seen = key[0], set()
+        while (rev := self._same_as.get(rev)) is not None and rev not in seen:
+            seen.add(rev)
+            old = self.frames.get((rev, *key[1:]))
+            if old is not None and (want is None or want(old)):
+                self.frames.put(key, old)  # no-op when a lesser frame holds the key
+                return old
+        return hit
 
     def _seed_frame(self, new: bytes):
         """The frame the edit's verify run drew at the playhead, cached for the
@@ -1633,6 +1952,7 @@ TEXT_CLASSES = {"Text", "MarkupText", "MathTex", "Tex", "SingleStringMathTex", "
                 "Variable", "BulletedList"}
 
 STRUCTURAL = ("edit.insert", "edit.composite", "edit.preset", "edit.duplicate", "edit.group", "edit.delete", "edit.delete_clip")
+SCENE_EDITS = ("edit.scene_add", "edit.scene_delete", "edit.scene_rename")
 TIMELINE = ("edit.voice", "edit.shift", "edit.offset", "edit.merge", "edit.split", "edit.reorder",
             "edit.scene_order", "edit.section")
 

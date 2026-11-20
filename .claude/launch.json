@@ -14,6 +14,10 @@
       "port": 8770
     },
     {
+      "name": "remanim-deployed",
+      "url": "http://localhost:8770"
+    },
+    {
       "name": "remanim-tailnet",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "studio.server", "--allow-host", "your-pc.your-tailnet.ts.net"],
