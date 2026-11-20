@@ -3,7 +3,7 @@
   "contract": 1,
   "id": "remanim",
   "name": "reManim",
-  "description": "Motion editor for Manim scenes",
+  "description": "Manim motion editor",
   "icon": "web/public/icons/icon-192.png",
   "color": "#3b8cff",
   "port": 8770,
