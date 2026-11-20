@@ -213,4 +213,9 @@ def main(conn, path: str, quality: str):
         except Exception as e:
             reply = {"error": {"message": f"{type(e).__name__}: {e}",
                                "traceback": traceback.format_exc()[-4000:]}}
+        if msg.get("op") == "load" and "error" in reply:
+            # a failed load leaves the previous engine (the last version that ran), or
+            # none in a fresh process: the studio reloads that version when there's none
+            reply["loaded"] = worker.engine is not None
+            reply["deps"] = _local_modules(worker.path)
         conn.send(reply)

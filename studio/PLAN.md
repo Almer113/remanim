@@ -252,7 +252,8 @@ Export dialog (quality, format, joined video). Keyboard shortcuts. Performance
 passes. Error and recovery UX. Docs. Optional: desktop wrapper, a Claude panel,
 a real name and licence for open-sourcing.
 
-**Status (2026-11-20): built; exit check done** (`docs/phase6/exit_report.md`).
+**Status (2026-11-20): built; exit check done** (`docs/phase6/exit_report.md`);
+reviewed in `docs/review_phase6.md`.
 Plan in `docs/phase6/plan.md`, speed in `docs/phase6/baseline.md`, error
 catalogue in `docs/phase6/errors.md`. All four exit criteria met: a narrated
 video made and exported (`-ql`, `-qh`) from a blank file in the studio, speed

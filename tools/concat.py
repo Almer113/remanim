@@ -1,7 +1,8 @@
 """Join rendered scene videos into one file (video remuxed, audio rebuilt).
 
 All inputs must come from the same render settings (same quality), which is
-always true for scenes of one file rendered together.
+always true for scenes of one file rendered together. The scenes' .srt
+captions are joined too (OUT.srt), with each cue moved to its scene's start.
 
 Usage:
   .venv\\Scripts\\python tools\\concat.py OUT.mp4 IN1.mp4 IN2.mp4 ...
@@ -12,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -107,7 +109,41 @@ def concat(out: Path, inputs: list[Path]) -> float:
                     flush_audio(float(pkt.dts * ov.time_base))
                     dst.mux(pkt)
         flush_audio(float("inf"))
+    join_srt(out, inputs, offsets)
     return total
+
+
+_CUE = re.compile(r"(\d+):(\d+):(\d+),(\d+) --> (\d+):(\d+):(\d+),(\d+)\s*\n(.*)", re.S)
+
+
+def _stamp(t: float) -> str:
+    ms = int(round(t * 1000))
+    return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
+
+
+def join_srt(out: Path, inputs: list[Path], offsets: list[float]) -> int:
+    """The clips' .srt cues, each moved by its clip's start, as out's .srt.
+    Captions for the whole video, and what audio_check.py checks the joined
+    file against (every cue must have sound under it). No cues: no .srt (an
+    old one is removed, so it can't describe another join)."""
+    sec = lambda h, m, s, ms: int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+    cues = []
+    for p, off in zip(inputs, offsets):
+        srt = p.with_suffix(".srt")
+        if not srt.is_file():
+            continue
+        for block in srt.read_text(encoding="utf-8").replace("\r\n", "\n").strip().split("\n\n"):
+            m = _CUE.search(block)
+            if m:
+                g = m.groups()
+                cues.append((sec(*g[:4]) + off, sec(*g[4:8]) + off, g[8].strip()))
+    dst = out.with_suffix(".srt")
+    if not cues:
+        dst.unlink(missing_ok=True)
+        return 0
+    dst.write_text("".join(f"{i}\n{_stamp(a)} --> {_stamp(b)}\n{text}\n\n" for i, (a, b, text) in enumerate(cues, 1)),
+                   encoding="utf-8")
+    return len(cues)
 
 
 def main() -> None:

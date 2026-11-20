@@ -824,8 +824,15 @@ class Engine:
             n_frames = int(dur / step) if frozen else len(np.arange(0, dur, step))
             if events is not None:
                 events.append(engine._event(renderer, scene, start, n_frames, step))
-            scene.begin_animations()
             hit = t is not None and start <= t < start + n_frames * step
+            ghosts = None  # as the cursor pool draws them, so both give the same frame
+            if hit and not frozen:
+                try:
+                    with _kept_counts():
+                        ghosts = transform_ghosts(scene.animations) or None
+                except Exception:  # noqa: BLE001
+                    ghosts = None
+            scene.begin_animations()
             if hit:
                 times = np.arange(0, dur, step) if not frozen else [0.0]
                 k = min(int((t - start) / step + 1e-6), n_frames - 1)
@@ -840,7 +847,7 @@ class Engine:
                         renderer.time = start + i * step
                         scene.update_to_time(lt)
                 renderer.time = clock
-                captured["c"] = capture(scene, want_ids)
+                captured["c"] = capture(scene, want_ids, ghosts)
                 if stop:
                     raise _StopAt
                 renderer.time = start

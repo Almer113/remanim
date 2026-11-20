@@ -32,7 +32,7 @@ function save(file: string, c: Choice) {
 export function jobLine(j: ExportJob): string {
   const done = j.scenes.filter((s) => s.state === "done").length;
   const cur = j.scenes.find((s) => s.state === "rendering");
-  if (j.state === "rendering") return `rendering ${done + 1}/${j.scenes.length}${cur ? ` · ${cur.name}${cur.pct != null ? ` ${cur.pct}%` : ""}` : ""}`;
+  if (j.state === "rendering") return `rendering ${done + 1}/${j.scenes.length}${cur ? ` · ${cur.name}${cur.anim != null ? ` · animation ${cur.anim + 1}` : ""}` : ""}`;
   if (j.state === "waiting") return j.message || "waiting for another render of this file";
   if (j.state === "joining") return "joining the scenes…";
   if (j.state === "checking") return "checking the narration…";
@@ -134,8 +134,7 @@ export function ExportDialog({ conn, file, scenes, active, jobs, onClose }: {
                 {RUNNING.has(j.state) && <button onClick={() => conn.request({ type: "export.cancel", id: j.id })}>Cancel</button>}
               </div>
               {RUNNING.has(j.state) && (
-                <progress max={j.scenes.length} value={j.scenes.filter((s) => s.state === "done").length
-                  + ((j.scenes.find((s) => s.state === "rendering")?.pct ?? 0) / 100)} />
+                <progress max={j.scenes.length} value={j.scenes.filter((s) => s.state === "done").length} />
               )}
               <ul>
                 {j.scenes.map((s, i) => (

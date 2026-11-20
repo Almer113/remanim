@@ -135,8 +135,32 @@ class Uses(Scene):
             await doc.deps_changed()
             assert "dependency" in said
             assert doc.traces["Uses"]["duration"] == pytest.approx(2.0, abs=0.07)
+            # review after Phase 6: the module breaks, then goes back to the same bytes.
+            # While broken, the last good version can't run either (it imports the
+            # module), and its frames say so; going back must reload, though the
+            # digest is the one of the last good load
+            mod.write_text("RUN = (\n", encoding="utf-8")
+            await doc.deps_changed()
+            assert doc.model()["error"]["code"] == "crash"
+            fr = await doc.frame("Uses", 5)
+            assert "can't be drawn" in fr["error"]["message"], fr
+            mod.write_text("RUN = 2.0\n", encoding="utf-8")
+            await doc.deps_changed()
+            assert doc.error is None and doc.traces["Uses"]["duration"] == pytest.approx(2.0, abs=0.07)
         finally:
             doc.close()
+        # a file whose module is broken from the start: fixing the module loads it
+        mod.write_text("RUN = (\n", encoding="utf-8")
+        doc = Document(path, [], notify)
+        try:
+            await doc.load()
+            assert doc.error and doc.depends_on(mod)
+            mod.write_text("RUN = 1.0\n", encoding="utf-8")
+            await doc.deps_changed()
+            assert doc.error is None and doc.traces["Uses"]["duration"] == pytest.approx(1.0, abs=0.07)
+        finally:
+            doc.close()
+            mod.write_text("RUN = 1.0\n", encoding="utf-8")
     run(go())
 
 

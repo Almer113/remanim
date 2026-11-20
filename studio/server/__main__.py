@@ -49,6 +49,15 @@ def app_browser() -> str | None:
     return None
 
 
+def is_studio(url: str) -> bool:
+    """Is the program on that port the studio (not some other server)?"""
+    try:
+        with urllib.request.urlopen(url, timeout=2) as r:
+            return b"Manim Studio" in r.read(65536)
+    except Exception:
+        return False
+
+
 def open_app_window(url: str, background: bool = True):
     """Once the server answers, open it as an app window."""
     exe = app_browser()
@@ -93,7 +102,8 @@ def main():
     if args.dev:
         app.DEV_ORIGINS.update(app.VITE_ORIGINS)
     if not port_free(args.port):
-        if args.app:  # already running: just open another window onto it
+        if args.app and is_studio(f"http://127.0.0.1:{args.port}/"):
+            # already running: just open another window onto it
             open_app_window(f"http://127.0.0.1:{args.port}/", background=False)
             return
         sys.exit(f"Port {args.port} is in use: the studio is probably running already "

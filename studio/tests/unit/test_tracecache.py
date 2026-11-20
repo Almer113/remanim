@@ -118,3 +118,33 @@ def test_scene_key_follows_line_positions():
     above = SRC.replace(b"        self.play(Create(self.c))\n",
                         b"        self.play(Create(self.c))\n        self.wait()\n")
     assert _text(above, "B") != b
+
+
+def test_a_scene_that_names_another_scene_class_keeps_it_in_its_key():
+    # review after Phase 6: only bases were followed, so a call like
+    # Other.helper(self) kept a stale trace after Other changed
+    import ast
+    src = b"class A(Scene):\n    def construct(self):\n        B.helper(self)\n\nclass B(Scene):\n    def helper(self):\n        pass\n"
+    changed = src.replace(b"pass", b"self.wait()")
+    t = lambda d: tracecache.scene_text(ast.parse(d), d, "A", ["A", "B"])  # noqa: E731
+    assert t(src) != t(changed)
+    # a scene that doesn't mention B still ignores it
+    plain = src.replace(b"B.helper(self)", b"pass")
+    assert t(plain) == t(plain.replace(b"    def helper(self):\n        pass", b"    def helper(self):\n        x = 1"))
+
+
+def test_trim_runs_on_the_first_put_and_clears_old_temp_files(tmp_path, monkeypatch):
+    import os
+    import time
+    monkeypatch.setattr(tracecache, "DISK_LIMIT", 2)
+    for i in range(4):
+        (tmp_path / f"old{i}.json").write_text("{}")
+        os.utime(tmp_path / f"old{i}.json", (time.time() - 100 + i, time.time() - 100 + i))
+    stale = tmp_path / "k.123.tmp"
+    stale.write_text("x")
+    os.utime(stale, (time.time() - 3600, time.time() - 3600))
+    c = TraceCache(tmp_path)
+    c.put("fresh", TRACE)  # a short session: one put, still trimmed
+    left = sorted(p.name for p in tmp_path.glob("*.json"))
+    assert left == ["fresh.json", "old3.json"], left
+    assert not stale.exists()

@@ -11,9 +11,14 @@ path of its own (the file stays the only source of truth).
 
 Limits:
 - one question at a time; Stop kills it;
-- tools: read and edit files, search; no shell. Permission mode acceptEdits,
-  so an edit needs no prompt (there is nobody to answer one), and anything
-  outside the allowed tools is refused by Claude Code itself;
+- tools: read and edit files, search; no shell. `--tools` limits the set
+  Claude Code offers at all (allowedTools alone only pre-approves), Bash is
+  disallowed on top, `--restricted` keeps the file tools inside the project
+  and ignores settings files that could allow more, and `--strict-mcp-config`
+  leaves out MCP servers and claude.ai connectors (found in the review after
+  Phase 6: the panel's Claude could see the user's Google Docs connectors).
+  Permission mode acceptEdits: an edit needs no prompt (nobody could answer
+  one). Side effect: the user's settings (their model choice) don't apply;
 - off for pages reached through an `--allow-host` name (a tailnet) unless the
   server was started with `--allow-claude-remote`: a remote page could
   otherwise run an agent on this machine;
@@ -25,12 +30,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS = "Read Edit Write Glob Grep"
+# Claude Code session ids are UUIDs; anything else is dropped, never passed on
+# (a value like "--some-flag" after --resume would be read as a flag)
+SESSION_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 SYSTEM = (
     "You are answering inside Manim Studio, a visual editor for Manim CE scene files. "
     "The studio reloads the file by itself when you save it, so after an edit just say what you changed. "
@@ -104,6 +113,7 @@ class ClaudePanel:
 
     def status(self) -> dict:
         return {"type": "claude.status", "available": bool(self.cli), "busy": self.busy,
+                "run": self.run_id if self.busy else None,
                 "why": None if self.cli else "Claude Code isn't installed (no `claude` on PATH)"}
 
     @property
@@ -112,7 +122,8 @@ class ClaudePanel:
 
     def args(self, session: str | None) -> list[str]:
         a = [self.cli, "-p", "--output-format", "stream-json", "--verbose",
-             "--permission-mode", "acceptEdits", "--allowedTools", TOOLS,
+             "--permission-mode", "acceptEdits", "--tools", TOOLS.replace(" ", ","), "--allowedTools", TOOLS,
+             "--disallowedTools", "Bash", "--restricted", "--strict-mcp-config",
              "--append-system-prompt", SYSTEM]
         if session:
             a += ["--resume", session]
@@ -128,7 +139,7 @@ class ClaudePanel:
             return {"type": "error", "message": f"keep the question under {MAX_PROMPT} characters"}
         if self.busy:
             return {"type": "error", "message": "Claude is still answering; stop it or wait"}
-        if session is not None and not (isinstance(session, str) and all(c.isalnum() or c == "-" for c in session)):
+        if session is not None and not (isinstance(session, str) and SESSION_RE.match(session)):
             session = None
         self.run_id += 1
         self.stop_asked = False
@@ -160,9 +171,14 @@ class ClaudePanel:
         except OSError as e:
             await self._push(rid, {"kind": "result", "ok": False, "text": f"couldn't start Claude Code: {e}"})
             return
-        proc.stdin.write(prompt.encode("utf-8"))
-        await proc.stdin.drain()
-        proc.stdin.close()
+        if self.stop_asked:  # Stop came while the process was starting
+            proc.kill()
+        try:
+            proc.stdin.write(prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # it exited early; its stderr says why, below
         err_task = asyncio.create_task(proc.stderr.read())  # read alongside, or a full pipe stalls it
         got_result = False
         while True:

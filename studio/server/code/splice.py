@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,7 +57,17 @@ def write_atomic(path: Path, data: bytes) -> None:
         raise EditError("the result would not parse")
     tmp = path.with_name(path.name + ".studio-tmp")
     tmp.write_bytes(data)
-    os.replace(tmp, path)
+    # On Windows the replace fails while any process has the file open for
+    # reading (the engine loading it, an editor, a virus scanner): wait a
+    # little rather than refuse the edit.
+    for wait in (0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 0):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if not wait:
+                raise
+            time.sleep(wait)
 
 
 # -- numbers -----------------------------------------------------------------

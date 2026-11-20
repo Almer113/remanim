@@ -13,13 +13,13 @@ prompt = sys.stdin.read()
 args = sys.argv[1:]
 def out(o):
     print(json.dumps(o), flush=True)
-out({"type": "system", "subtype": "init", "session_id": "abc-123", "model": "m"})
+out({"type": "system", "subtype": "init", "session_id": "0c6f4b1e-2d3a-4b5c-8d9e-0f1a2b3c4d5e", "model": "m"})
 if "hang" in prompt:
     time.sleep(60)
 out({"type": "assistant", "message": {"content": [
     {"type": "text", "text": "echo:" + prompt.splitlines()[-1]},
     {"type": "tool_use", "name": "Edit", "input": {"file_path": "order_matters.py"}}]}})
-out({"type": "result", "subtype": "success", "is_error": False, "session_id": "abc-123",
+out({"type": "result", "subtype": "success", "is_error": False, "session_id": "0c6f4b1e-2d3a-4b5c-8d9e-0f1a2b3c4d5e",
      "total_cost_usd": 0.01, "num_turns": 2, "result": "done",
      "resumed": "--resume" in args})
 '''
@@ -58,9 +58,9 @@ def test_ask_streams_and_resumes(tmp_path):
         kinds = [m["kind"] for m in seen]
         assert kinds == ["session", "text", "tool", "result"], seen
         assert seen[1]["text"] == "echo:make it blue"
-        assert seen[3]["ok"] and seen[3]["session"] == "abc-123"
+        assert seen[3]["ok"] and seen[3]["session"] == "0c6f4b1e-2d3a-4b5c-8d9e-0f1a2b3c4d5e"
         seen.clear()
-        await p.ask("follow up", {}, session="abc-123")
+        await p.ask("follow up", {}, session="0c6f4b1e-2d3a-4b5c-8d9e-0f1a2b3c4d5e")
         await p.task
         assert seen[-1]["kind"] == "result" and seen[-1]["ok"]
         # a session id with anything odd in it is dropped, never passed to the CLI
@@ -69,7 +69,16 @@ def test_ask_streams_and_resumes(tmp_path):
         p.args = lambda s: used.append(s) or args(s)
         await p.ask("x", {}, session="a b;c")
         await p.task
-        assert used == [None]
+        # nor a flag-shaped one: after --resume it would be read as a flag
+        await p.ask("x", {}, session="--dangerously-skip-permissions")
+        await p.task
+        assert used == [None, None]
+        # the tool set is limited, not just pre-approved, and the shell is off
+        a = ClaudePanel(lambda m: None, cli="claude").args(None)
+        assert a[a.index("--tools") + 1] == "Read,Edit,Write,Glob,Grep"
+        assert a[a.index("--disallowedTools") + 1] == "Bash"
+        # no code-running tools, file tools kept to the project, no MCP connectors
+        assert "--restricted" in a and "--strict-mcp-config" in a
     asyncio.run(go())
 
 
@@ -86,6 +95,12 @@ def test_stop(tmp_path):
         last = seen[-1]
         assert last["kind"] == "result" and not last["ok"] and last["stopped"]
         assert (await p.stop())["type"] == "error"
+        # a Stop that arrives while the process is still starting still stops it
+        seen.clear()
+        await p.ask("hang please", {})
+        await p.stop()
+        await asyncio.wait_for(p.task, 10)
+        assert seen[-1]["kind"] == "result" and seen[-1]["stopped"], seen
     asyncio.run(go())
 
 

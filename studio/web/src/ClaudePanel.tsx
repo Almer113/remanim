@@ -15,12 +15,12 @@ type Item =
 
 const TOOL_WORDS: Record<string, string> = { Read: "read", Edit: "edited", Write: "wrote", Glob: "looked for", Grep: "searched" };
 
-function load(): { items: Item[]; session: string | null } {
+function load(): { items: Item[]; session: string | null; run: number | null } {
   try {
     const v = JSON.parse(sessionStorage.getItem("studio.claude") ?? "null");
-    if (v && Array.isArray(v.items)) return { items: v.items.slice(-200), session: v.session ?? null };
+    if (v && Array.isArray(v.items)) return { items: v.items.slice(-200), session: v.session ?? null, run: typeof v.run === "number" ? v.run : null };
   } catch { /* storage off */ }
-  return { items: [], session: null };
+  return { items: [], session: null, run: null };
 }
 
 // stays mounted once opened (hidden when closed), so an answer keeps arriving while it is closed
@@ -31,19 +31,37 @@ export function ClaudePanel({ conn, ctx, open, onClose }: { conn: Conn; ctx: Cla
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ available: boolean; why: string | null } | null>(null);
   const [text, setText] = useState("");
-  const runRef = useRef<number | null>(null);
+  // this page's run: its events are shown; another page's (another tab) are not,
+  // nor is its session taken over
+  const runRef = useRef<number | null>(first.current.run);
+  const asking = useRef(false);   // between sending a question and the server's id for it
+  const [run, setRun] = useState<number | null>(first.current.run);
   const logRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    conn.request({ type: "claude.status" }).then((r) => {
-      if (r.type === "claude.status") { setStatus({ available: r.available, why: r.why }); setBusy(!!r.busy); }
+    // on mount and after every reconnect: an answer may have ended while the
+    // connection was down, and its last event never came
+    const status = () => conn.request({ type: "claude.status" }).then((r) => {
+      if (r.type !== "claude.status") return;
+      setStatus({ available: r.available, why: r.why });
+      setBusy(!!r.busy);
+      if (!r.busy && !asking.current) { runRef.current = null; setRun(null); }
     });
+    status();
     return conn.on((m) => {
-      if (m.type !== "claude.event" || (runRef.current != null && m.id !== runRef.current)) return;
+      if (m.type === "conn.open") { status(); return; }
+      if (m.type !== "claude.event") return;
+      const mine = m.id === runRef.current || (runRef.current == null && asking.current);
+      if (!mine) {
+        if (m.kind === "result") setBusy(false);  // the other page's answer ended: free to ask
+        return;
+      }
       if (m.kind === "session") { if (m.session) setSession(m.session); return; }
       if (m.kind === "result") {
         setBusy(false);
+        runRef.current = null;
+        setRun(null);
         if (m.session) setSession(m.session);
       }
       const { type: _t, id: _i, ...item } = m;
@@ -52,9 +70,9 @@ export function ClaudePanel({ conn, ctx, open, onClose }: { conn: Conn; ctx: Cla
   }, [conn]);
 
   useEffect(() => {
-    try { sessionStorage.setItem("studio.claude", JSON.stringify({ items: items.slice(-200), session })); } catch { /* */ }
+    try { sessionStorage.setItem("studio.claude", JSON.stringify({ items: items.slice(-200), session, run })); } catch { /* */ }
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
-  }, [items, session]);
+  }, [items, session, run]);
 
   useEffect(() => { if (open) inputRef.current?.focus(); }, [open]);
 
@@ -66,8 +84,11 @@ export function ClaudePanel({ conn, ctx, open, onClose }: { conn: Conn; ctx: Cla
     setItems((xs) => [...xs, { kind: "you", text: q, where }]);
     setText("");
     setBusy(true);
+    asking.current = true;
+    runRef.current = null;
     conn.request({ type: "claude.ask", prompt: q, session, context: ctx }).then((r) => {
-      if (r.type === "claude.started") runRef.current = r.id;
+      asking.current = false;
+      if (r.type === "claude.started") { runRef.current = r.id; setRun(r.id); }
       else {
         setBusy(false);
         setItems((xs) => [...xs, { kind: "result", ok: false, text: r.message ?? r.why ?? "couldn't ask" }]);
@@ -119,7 +140,7 @@ export function ClaudePanel({ conn, ctx, open, onClose }: { conn: Conn; ctx: Cla
             if (e.key === "Escape") { e.preventDefault(); onClose(); }
           }} />
         {busy
-          ? <button onClick={() => conn.request({ type: "claude.stop" })} title="Stop Claude">■ Stop</button>
+          ? <button onClick={() => conn.request({ type: "claude.stop" }).then((r) => { if (r.type === "error") setBusy(false); /* nothing running: it ended unseen */ })} title="Stop Claude">■ Stop</button>
           : <button disabled={!text.trim() || !status?.available} onClick={ask} title="Send (Enter; Shift+Enter for a new line)">Send</button>}
       </div>
     </aside>

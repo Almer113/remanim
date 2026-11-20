@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -75,12 +76,13 @@ def scene_text(tree, data: bytes, scene: str, scenes: list[str]) -> bytes:
     import ast
     classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
     keep, todo = set(), [scene]
-    while todo:  # this scene and the classes of this file it inherits from
+    while todo:  # this scene and the classes of this file it inherits from or names
         name = todo.pop()
         if name in keep or name not in classes:
             continue
         keep.add(name)
-        todo += [b.id for b in classes[name].bases if isinstance(b, ast.Name)]
+        # any class of this file it mentions: a base, Other.helper(self), Other.CONST
+        todo += [x.id for x in ast.walk(classes[name]) if isinstance(x, ast.Name) and x.id in classes]
     others = set(scenes) - keep
     lines = data.splitlines(keepends=True)
     out = []
@@ -112,8 +114,10 @@ class TraceCache:
             return None
         tr = self.mem.get(k)
         if tr is None:
+            f = self.dir / f"{k}.json"
             try:
-                tr = json.loads((self.dir / f"{k}.json").read_text(encoding="utf-8"))
+                tr = json.loads(f.read_text(encoding="utf-8"))
+                os.utime(f)  # trimming drops the least recently used, not the oldest written
             except (OSError, ValueError):
                 tr = None
             if not isinstance(tr, dict) or "events" not in tr:
@@ -147,10 +151,16 @@ class TraceCache:
     _puts = 0
 
     def _trim(self):
+        # on the first put of each run, then every 50th: short sessions trim too
         self._puts += 1
-        if self._puts % 50:
+        if self._puts % 50 != 1:
             return
         try:
+            now = time.time()
+            # a crashed write's leftovers
+            for t in self.dir.glob("*.tmp"):
+                if now - t.stat().st_mtime > 60:
+                    t.unlink()
             files = sorted(self.dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
         except OSError:
             return

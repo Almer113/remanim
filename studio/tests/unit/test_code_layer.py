@@ -198,3 +198,20 @@ def test_long_nested_keyword_moves_the_rest_to_its_own_line():
         "                         rate_func=rate_functions.ease_out_back),",
         "                  FadeIn(blob, shift=UP * 0.2), run_time=0.8)"]
     assert apply(apply(s.data, [e]), inverse(s.data, [e])) == s.data
+
+
+def test_write_waits_for_a_reader_to_let_go(tmp_path):
+    """Review after Phase 6: on Windows the replace failed while the engine
+    had the file open for reading, so an undo was refused (and the corpus
+    run left edits on disk). It now waits a little and tries again."""
+    import threading
+    import time
+
+    from studio.server.code.splice import write_atomic
+    p = tmp_path / "scene.py"
+    p.write_bytes(b"x = 1\n")
+    f = open(p, "rb")  # no delete sharing on Windows: os.replace fails while open
+    threading.Thread(target=lambda: (time.sleep(0.15), f.close()), daemon=True).start()
+    write_atomic(p, b"x = 2\n")
+    assert p.read_bytes() == b"x = 2\n"
+    assert not (tmp_path / "scene.py.studio-tmp").exists()

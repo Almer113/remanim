@@ -45,7 +45,9 @@ pane, not VS Code.
   `.srt` cue has sound under it; joined videos have an audio track
   (`--scenes <file>.py S1 S2 ... --quality l`, or a path to the full video).
 - `tools/concat.py` — joins rendered scenes into one video. Video is remuxed;
-  audio is rebuilt as one track, with silence for scenes without narration:
+  audio is rebuilt as one track, with silence for scenes without narration.
+  The scenes' `.srt` cues are joined too (`<out>.srt`, shifted to each
+  scene's start), so `audio_check.py` checks every cue of the joined file:
   `tools/concat.py media/<video>_full.mp4 --scenes <file>.py Scene1 Scene2 ... --quality h`.
 - `tools/fixtures/` — deliberately broken scenes for testing the tools. Not content.
 - **Never run two Manim renders of the same file at once.** On Windows they

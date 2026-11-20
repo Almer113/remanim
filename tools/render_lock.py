@@ -8,8 +8,12 @@ stem because that's how Manim names its output folder.
     with held("order_matters", "studio export", on_wait=print):
         subprocess.run([... manim ...])
 
-The lock holds the owner's pid. A lock whose process is gone is stale and
-is taken over. Used by preview_server.py and the studio's export.
+The lock is an OS file lock (msvcrt on Windows, flock elsewhere) on a byte
+far past the file's text, held through an open handle. The OS drops it when
+the process ends, however it ends, so there is no stale lock to clear, no
+pid to reuse and no unlink to race. The file's text says who holds it
+(pid, owner, start time) for "waiting for ..." messages; the file itself is
+never deleted. Used by preview_server.py and the studio's export.
 """
 
 from __future__ import annotations
@@ -18,81 +22,107 @@ import contextlib
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MEDIA = ROOT / "media"
+LOCK_AT = 1 << 30   # the locked byte: past the text, so the text stays readable
+_O_BIN = getattr(os, "O_BINARY", 0)
+
+_held: dict[str, int] = {}   # stem -> fd this process holds the lock through
+_guard = threading.Lock()
 
 
 def lock_path(stem: str) -> Path:
     return MEDIA / f".render-{stem}.lock"
 
 
-def pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
+def _lock(fd: int) -> bool:
     if sys.platform == "win32":
-        # os.kill(pid, 0) would terminate the process on Windows
-        import ctypes
-        k32 = ctypes.windll.kernel32
-        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
-            return False
+        import msvcrt
+        os.lseek(fd, LOCK_AT, os.SEEK_SET)
         try:
-            code = ctypes.c_ulong()
-            ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
-            return bool(ok) and code.value == 259  # STILL_ACTIVE
-        finally:
-            k32.CloseHandle(h)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    import fcntl
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
-    return True
+    except OSError:
+        return False
+
+
+def _unlock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+        os.lseek(fd, LOCK_AT, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _read(fd: int) -> dict:
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        info = json.loads(os.read(fd, 4096).decode("utf-8") or "{}")
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
 
 
 def holder(stem: str) -> dict | None:
-    """Who holds the lock now, or None (free, or held by a process that died)."""
+    """Who holds the lock now ({} if the holder hasn't written its name yet),
+    or None if it's free."""
+    with _guard:
+        if stem in _held:
+            return _read(_held[stem])
     try:
-        info = json.loads(lock_path(stem).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        fd = os.open(lock_path(stem), os.O_RDWR | _O_BIN)
+    except OSError:
         return None
-    if not isinstance(info, dict) or not pid_alive(int(info.get("pid", 0))):
-        return None
-    return info
+    try:
+        if _lock(fd):
+            _unlock(fd)
+            return None
+        return _read(fd)
+    finally:
+        os.close(fd)
 
 
 def try_acquire(stem: str, owner: str) -> bool:
-    p = lock_path(stem)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    body = json.dumps({"pid": os.getpid(), "owner": owner, "started": time.time()})
-    for _ in range(2):
-        try:
-            fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            if holder(stem) is not None:
-                return False
-            with contextlib.suppress(OSError):
-                p.unlink()  # stale: its process is gone
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
+    with _guard:
+        if stem in _held:   # held by this process already (another thread or job)
+            return False
+        p = lock_path(stem)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(p, os.O_RDWR | os.O_CREAT | _O_BIN)
+        if not _lock(fd):
+            os.close(fd)
+            return False
+        body = json.dumps({"pid": os.getpid(), "owner": owner, "started": time.time()})
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, body.encode("utf-8"))
+        _held[stem] = fd
         return True
-    return False
 
 
 def release(stem: str) -> None:
-    p = lock_path(stem)
-    try:
-        info = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    with _guard:
+        fd = _held.pop(stem, None)
+    if fd is None:
         return
-    if isinstance(info, dict) and info.get("pid") == os.getpid():
-        with contextlib.suppress(OSError):
-            p.unlink()
+    with contextlib.suppress(OSError):
+        os.ftruncate(fd, 0)
+    with contextlib.suppress(OSError):
+        _unlock(fd)
+    os.close(fd)
 
 
 @contextlib.contextmanager

@@ -155,7 +155,7 @@ class Document:
         self.load_lock = asyncio.Lock()
         self.last_write: bytes | None = None
         self.prefetch_task: asyncio.Task | None = None
-        self.tracing: tuple[str, float] | None = None   # (scene, or "" for the module; start)
+        self.tracing: tuple[str, float, bytes] | None = None   # (scene, or "" for the module; start; bytes)
         self._stopped: dict[bytes, set] = {}               # bytes → what the user stopped in them
 
     # -- loading -------------------------------------------------------------
@@ -169,9 +169,12 @@ class Document:
             await self._load(gen)
 
     async def _load(self, gen: int):
+        # the bytes this load is for: self.data can change while it awaits (a
+        # save), and an old trace must never be filed under the new bytes
+        data = self.data
         self.rev += 1
         self.pending.clear()  # planned against the old bytes
-        self.src = Source(self.data)
+        self.src = Source(data)
         self.error = None
         # cleared first: a reply waiting on this reload (_reload_for_reply) must not
         # take the old revision's traces for the new one
@@ -186,31 +189,50 @@ class Document:
             self._show_good(good)
             await self.send_model()
             return
-        if self.data in self._stopped and "" in self._stopped[self.data]:
+        # the modules it imports, and their bytes, as they were before the engine
+        # read them: a module saved during the load must not be cached as read
+        deps_before = sorted(set(getattr(self, "deps", [])) | set(self._static_deps()))
+        seen_before = tracecache.deps_digest(self.path, deps_before)
+        if data in self._stopped and "" in self._stopped[data]:
             r = {"error": {"code": "stopped", "line": None, "message": "stopped: the file ran too long while "
                                                                        "loading (an endless loop?); fix it and save"}}
         else:
-            self.tracing = ("", time.monotonic())
+            self.tracing = ("", time.monotonic(), data)
             await self.send_status()
-            r = await self._engine({"op": "load", "data": self.data, "path": str(self.path)})
+            r = await self._engine({"op": "load", "data": data, "path": str(self.path)})
             self.tracing = None
             await self.send_status()  # the UI's "loading…" pill ends here, whatever the outcome
         if "error" in r:
             self.error = {"code": "crash", **r["error"]}
-            if self.data in self._stopped and "" in self._stopped[self.data]:
+            # fixing a module it imports must reload it, even if it never ran here
+            self.deps = sorted(set(deps_before) | set(r.get("deps") or []))
+            self._deps_seen = seen_before
+            if data in self._stopped and "" in self._stopped[data]:
                 self.error.update(code="stopped", message="stopped: the file ran too long while loading "
                                                           "(an endless loop?); fix it and save")
-            if good is not None and (r["error"].get("restarted") or self.error["code"] == "stopped"):
-                # the engine was replaced and holds nothing: load the version that ran
-                await self._engine({"op": "load", "data": good["data"]})
+            if good is not None and (r["error"].get("restarted") or self.error["code"] == "stopped"
+                                     or r.get("loaded") is False):
+                # the engine is new (a crash, a Stop, a changed module) and holds
+                # nothing: load the version that ran, so it can still be shown
+                self._cant_draw = None
+                back = await self._engine({"op": "load", "data": good["data"]})
+                if "error" in back:  # it imports what broke (a module): it can't run either
+                    self._cant_draw = ("the last version that ran can't be drawn now either: "
+                                       + (back["error"].get("message") or "it doesn't load"))
             self._show_good(good)
             await self.send_model()
             return
         self.traces = {}
-        self.good = {"data": self.data, "src": self.src, "meta": r, "traces": self.traces}
+        self._cant_draw = None
+        self.good = {"data": data, "src": self.src, "meta": r, "traces": self.traces}
         self.meta = r
-        self.deps = list(r.get("deps") or [])
-        self._deps_digest = tracecache.deps_digest(self.path, self.deps)
+        self.deps = sorted(set(r.get("deps") or []) | set(self._static_deps()))
+        self._deps_digest = self._deps_seen = tracecache.deps_digest(self.path, self.deps)
+        if tracecache.deps_digest(self.path, deps_before) != seen_before:
+            # a module changed while the engine imported it: which version it has is
+            # unknown, so nothing is cached, and the engine restarts with the new one
+            self._deps_digest = self._deps_seen = None
+            asyncio.get_running_loop().create_task(self.deps_changed())
         order = list(r["scenes"])
         if self.active in order:
             order.remove(self.active)
@@ -221,8 +243,8 @@ class Document:
         # one slow or endless scene must not hide the scenes that are ready
         known = {}
         for name in order:
-            t = tracecache.CACHE.get(self._trace_key(self.data, name))
-            if t is None and name in self._stopped.get(self.data, ()):
+            t = tracecache.CACHE.get(self._trace_key(data, name))
+            if t is None and name in self._stopped.get(data, ()):
                 t = {"name": name, "events": [], "duration": 0, "bases": [], "error": {
                     "code": "stopped", "line": None, "message": "stopped: this scene ran too long (an endless "
                                                                 "loop?); fix it and save to try again"}}
@@ -238,7 +260,7 @@ class Document:
                 return  # superseded (another edit, undo or save): stop tracing old bytes
             if name in known:
                 continue
-            self.tracing = (name, time.monotonic())
+            self.tracing = (name, time.monotonic(), data)
             await self.send_status()
             t = await self._engine({"op": "trace", "scene": name})
             self.tracing = None
@@ -247,7 +269,7 @@ class Document:
             if "error" in t and "events" not in t:
                 t = {"name": name, "events": [], "duration": 0, "error": t["error"], "bases": []}
             else:
-                tracecache.CACHE.put(self._trace_key(self.data, name), t)
+                tracecache.CACHE.put(self._trace_key(data, name), t)
             self.traces[name] = t
             if name == self.active:
                 await self.send_model()
@@ -259,7 +281,14 @@ class Document:
         if good is None:
             self.traces = {}
             return
-        self.meta, self.traces = good["meta"], good["traces"]
+        self.meta = good["meta"]
+        # scenes the last good version never got to (the file changed while it was
+        # tracing) would wait for a trace that never comes: say so instead
+        self.traces = {n: good["traces"].get(n) or {
+            "name": n, "events": [], "duration": 0, "bases": [], "error": {
+                "code": "untraced", "line": None,
+                "message": "not traced: the file changed before this scene was; fix the file to see it"}}
+            for n in good["meta"].get("scenes", [])}
 
     @property
     def stale(self) -> bool:
@@ -346,7 +375,7 @@ class Document:
         """A scene that was stopped, or ran past the engine's deadline, would
         do it again for every frame: those are refused, not run."""
         err = (self.traces.get(scene) or {}).get("error") or {}
-        if err.get("code") in ("stopped", "timeout"):
+        if err.get("code") in ("stopped", "timeout", "untraced"):
             return {"error": {"message": err.get("message") or "this scene doesn't finish", "code": err["code"]}}
         return None
 
@@ -356,6 +385,8 @@ class Document:
         never = self._never_ends(scene)
         if never:
             return never
+        if self.error and getattr(self, "_cant_draw", None):
+            return {"error": {"message": self._cant_draw, "code": "not_loaded"}}
         f = max(0, min(int(f), self.frame_count(scene) - 1))  # Manim never renders outside the scene
         key = (self.rev, scene, f, size, fmt)
         hit = self.frames.get(key)
@@ -401,8 +432,8 @@ class Document:
         these bytes; saving the file tries again."""
         if self.tracing is None:
             return {"type": "error", "message": "nothing is running"}
-        name = self.tracing[0]
-        self._stopped.setdefault(self.data, set()).add(name)
+        name, _, data = self.tracing
+        self._stopped.setdefault(data, set()).add(name)  # the bytes being traced, not newer ones
         self._stop_asked = True
         await asyncio.to_thread(self.worker.kill)
         return {"type": "stopped", "scene": name or None}
@@ -1550,6 +1581,26 @@ class Document:
             await self.notify({"type": "file.changed", "file": self.name, "by": "external"})
             await self.load()
 
+    def _static_deps(self) -> list[str]:
+        """Project modules the file imports by name, anywhere in it (`from style
+        import *`, an import inside construct()): known even when the file
+        doesn't load, so fixing the module reloads it."""
+        if not self.src.ok:
+            return []
+        names = []
+        for n in ast.walk(self.src.tree):
+            if isinstance(n, ast.Import):
+                names += [a.name for a in n.names]
+            elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                names.append(n.module)
+        out = set()
+        for m in names:
+            for base in {self.path.parent, ROOT}:
+                f = base / (m.replace(".", "/") + ".py")
+                if f.is_file() and f.resolve() != self.path.resolve():
+                    out.add(str(f.resolve()))
+        return sorted(out)
+
     def depends_on(self, path: Path) -> bool:
         try:
             p = str(Path(path).resolve())
@@ -1564,8 +1615,9 @@ class Document:
         async with self.edit_lock:
             # Windows reports a "modified" event when a module is only read (another
             # engine importing manim_kit.py): restart only if the bytes really changed
-            if tracecache.deps_digest(self.path, getattr(self, "deps", [])) == getattr(self, "_deps_digest", None):
+            if tracecache.deps_digest(self.path, getattr(self, "deps", [])) == getattr(self, "_deps_seen", None):
                 return
+            self._verified_frame = None  # drawn with the old module
             await self.notify({"type": "file.changed", "file": self.name, "by": "dependency"})
             await self.worker.fresh()
             await self.load()

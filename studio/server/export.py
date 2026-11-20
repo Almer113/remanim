@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,26 @@ _ANIM = re.compile(r"Animation\s+(\d+)\s*:.*?(\d+)%")
 
 class ExportError(Exception):
     pass
+
+
+def kill_tree(proc) -> None:
+    """End a render and everything it started (LaTeX, dvisvgm, the venv
+    launcher's child python). proc.kill() alone ends only the top process on
+    Windows, and the lock would then be released under a render still going."""
+    if proc is None or proc.returncode is not None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        try:
+            os.killpg(proc.pid, 9)  # started in its own session
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
 
 
 def check_spec(spec: dict, scenes_in_file: list[str]) -> dict:
@@ -109,7 +130,8 @@ def _newest(pattern_dir: Path, names: list[str], since: float) -> Path | None:
     return best[1] if best else None
 
 
-def find_output(file: str, scene: str, fmt: str, transparent: bool, since: float) -> Path | None:
+def find_output(file: str, scene: str, fmt: str, transparent: bool, since: float,
+                quality: str | None = None) -> Path | None:
     """Where Manim put this scene's render: media/videos/<stem>/<res>/ (or
     media/images/<stem>/ for a png sequence). The resolution folder depends
     on manim.cfg, so it's found, not assumed."""
@@ -118,7 +140,11 @@ def find_output(file: str, scene: str, fmt: str, transparent: bool, since: float
         d = ROOT / "media" / "images" / stem
         return _newest(d, [f"{scene}*.png", f"*/{scene}*.png"], since)
     ext = ".mov" if transparent and fmt == "mp4" else VIDEO_EXT[fmt]
-    return _newest(ROOT / "media" / "videos" / stem, [f"*/{scene}{ext}"], since)
+    d = ROOT / "media" / "videos" / stem
+    # the quality's own folder first: a render of another quality that just
+    # finished (the preview server's, say) must not pass for this one
+    own = _newest(d / QUALITIES[quality], [f"{scene}{ext}"], since) if quality else None
+    return own or _newest(d, [f"*/{scene}{ext}"], since)
 
 
 def _has_cues(srt: Path) -> bool:
@@ -155,14 +181,16 @@ class Exporter:
         if job is None or job.state in ("done", "failed", "cancelled"):
             return {"type": "error", "message": "no export running with that id"}
         job.cancel_asked = True
-        if job.proc is not None and job.proc.returncode is None:
-            try:
-                job.proc.kill()
-            except ProcessLookupError:
-                pass
+        kill_tree(job.proc)
         if job.state == "queued":
             await self._finish(job, "cancelled", "cancelled before it started")
         return {"type": "export.cancelling", "id": job_id}
+
+    def close(self):
+        """Studio shutdown: no render may outlive it (its lock goes with it)."""
+        for job in self.jobs.values():
+            job.cancel_asked = True
+            kill_tree(job.proc)
 
     def file_of(self, job_id: str, i: int) -> Path | None:
         """Only files an export made can be served (no paths from the client)."""
@@ -209,6 +237,10 @@ class Exporter:
             for sc in job.scenes:
                 ok = await self._render_scene(job, sc)
                 if job.cancel_asked:
+                    sc["state"] = "cancelled"
+                    for later in job.scenes:
+                        if later["state"] == "queued":
+                            later["state"] = "skipped"
                     return await self._finish(job, "cancelled", f"cancelled during {sc['name']}")
                 if not ok:
                     for later in job.scenes:
@@ -226,6 +258,9 @@ class Exporter:
                     job.log += log
                     return await self._finish(job, "failed", "joining the scenes failed")
                 job.joined = rel(out)
+                for other in self.jobs.values():  # that file is this job's now
+                    if other is not job and other.joined == job.joined:
+                        other.joined = None
             if spec["check"]:
                 job.state = "checking"
                 await self._send(job)
@@ -254,7 +289,7 @@ class Exporter:
         t0 = time.time()
         code, log = await self._run_proc(job, args, sc)
         sc["s"] = round(time.time() - t0, 1)
-        out = find_output(job.file, sc["name"], spec["format"], spec["transparent"], t0)
+        out = find_output(job.file, sc["name"], spec["format"], spec["transparent"], t0, spec["quality"])
         if code != 0 or out is None:
             sc["state"] = "failed"
             job.log += f"\n--- {sc['name']} ---\n" + log
@@ -269,7 +304,8 @@ class Exporter:
     async def _run_proc(self, job: Job, args: list[str], sc: dict | None) -> tuple[int, str]:
         env = dict(os.environ, PYTHONIOENCODING="utf-8", COLUMNS="200")
         job.proc = proc = await asyncio.create_subprocess_exec(
-            *args, cwd=str(ROOT), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            *args, cwd=str(ROOT), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=sys.platform != "win32")
         chunks: list[str] = []
         last_sent = 0.0
         buf = ""

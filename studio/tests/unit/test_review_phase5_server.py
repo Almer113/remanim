@@ -31,6 +31,20 @@ def test_local_host_needs_no_token(tailnet):
     assert _call("/api/files", "127.0.0.1:8770").text == "ok"
 
 
+def test_a_proxied_request_is_never_local(tailnet):
+    # review after Phase 6: through `tailscale serve` a peer could send
+    # "Host: localhost"; a proxy's headers mark it as another machine
+    for h in ({"X-Forwarded-For": "100.64.0.7"}, {"Tailscale-User-Login": "x@y"}, {"Forwarded": "for=1.2.3.4"}):
+        with pytest.raises(web.HTTPForbidden) as e:
+            _call("/api/files", "localhost:8770", headers=h)
+        assert "token" in e.value.text
+    assert _call("/api/files", "localhost:8770", headers={"X-Forwarded-For": "100.64.0.7"},
+                 cookies={app.TOKEN_COOKIE: "s3cret-token"}).text == "ok"
+    ask = {"type": "claude.ask", "prompt": "hi"}
+    assert app.gate(ask, "localhost:8770", via_proxy=True)["available"] is False
+    assert app.gate({"type": "export.reveal"}, "127.0.0.1:8770", via_proxy=True)["type"] == "error"
+
+
 def test_tailnet_host_without_token_is_refused(tailnet):
     with pytest.raises(web.HTTPForbidden) as e:
         _call("/api/files", "box.tail.ts.net:8770")

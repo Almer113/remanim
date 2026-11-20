@@ -175,6 +175,9 @@ after 6e; name and licence wait; milestones run 6a → 6e.
   A follow-up resumes the same Claude Code session. Each answer shows its
   cost; a one-word answer measured $0.39, because Claude Code reads the
   project's instructions every time.
+- **J / K / L** are one second back / play-pause / one second on (not
+  back, stop, forward), and a nudge is a fixed 0.1 (Shift 1, Alt 0.02),
+  not a safe-area grid step. The README and the help sheet say so.
 - **Ctrl+F was dropped:** the layers panel has no filter to focus.
   **"Show in folder"** was added to the export dialog (local pages only).
 - **The app window** is `--app` on the server (and `studio/Manim

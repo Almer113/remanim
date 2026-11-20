@@ -188,7 +188,7 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
           <div className="row"><label>Starts in group</label><span className="mono">+{(a.offset ?? 0).toFixed(2)} s</span></div>
         )}
         <div className="btns-row"><button disabled={!!locked || busy} onClick={actions.remove}
-          title="Delete (Del)">Delete {sel.anim !== null ? "this animation" : c.kind === "wait" ? "pause" : "clip"}</button></div>
+          title={tip("delete", "Delete")}>Delete {sel.anim !== null ? "this animation" : c.kind === "wait" ? "pause" : "clip"}</button></div>
         {c.kind === "play" && !a && c.anims.length > 1 && (
           <div className="muted small-gap">{c.anims.length} animations in this play(). Select one on its row to edit it alone.</div>
         )}
@@ -231,7 +231,7 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
         <button disabled={!!locked || busy || off || !!o.virtual} onClick={actions.duplicate} title={tip("duplicate")}>Duplicate</button>
         <button disabled={busy || off || actions.count < 2} onClick={actions.group}
           title={tip("group")}>Group{actions.count > 1 ? ` ${actions.count}` : ""}</button>
-        <button disabled={!!locked || busy} onClick={actions.remove} title="Delete (Del)">Delete</button>
+        <button disabled={!!locked || busy} onClick={actions.remove} title={tip("delete", "Delete")}>Delete</button>
         {TEXT_KINDS.has(o.class) && (
           <button disabled={!!locked || busy || off || !actions.partColour} onClick={() => actions.partColour?.()}
             title="Colour some letters or symbols of this text">Colour part…</button>

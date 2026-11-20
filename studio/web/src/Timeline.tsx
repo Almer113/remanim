@@ -248,7 +248,8 @@ export function Timeline(p: Props) {
       if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
       const tag = (document.activeElement?.tagName ?? "").toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select") return;
-      if (document.querySelector(".modal-back")) return;   // a dialog is open
+      // a dialog, or picking glyphs / editing text / camera mode: their own keys only
+      if (document.querySelector(".modal-back") || document.body.hasAttribute("data-overlay")) return;
       const a = actionFor(e, false);
       if (a === "ripple") setRipple((v) => !v);
       else if (a === "marker") addMarkerRef.current();

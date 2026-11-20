@@ -107,18 +107,19 @@ the share for the file.
 ✦ Claude opens a panel where you can ask Claude Code about the open
 file, or ask for a change ("make the circle blue and slower", "why does
 the label jump at 3 s?"). It runs your own Claude Code (`claude -p`) in
-the project folder, so `CLAUDE.md` and your Claude Code settings apply,
-and the question goes with a note of where you are: the file, scene,
-playhead and selection.
+the project folder, so it follows `CLAUDE.md`, and the question goes
+with a note of where you are: the file, scene, playhead and selection.
 
-- Claude can read, search and edit files, but has no shell, so it can't
-  render. It edits the `.py` file directly and the studio reloads it, as
-  with any save.
+- Claude can read, search and edit files in the project folder, and
+  nothing else: no shell (so it can't render), no MCP servers or claude.ai
+  connectors. It runs in Claude Code's restricted mode, which also means
+  your Claude Code settings files (your model choice, say) don't apply.
+  It edits the `.py` file directly and the studio reloads it, as with any
+  save.
 - The studio's Undo doesn't cover Claude's edits; git does.
 - A follow-up continues the same conversation until **New chat**. One
   question runs at a time; **Stop** ends it. Each answer shows its time
-  and cost. Even a short answer costs something, because Claude Code
-  reads the project's instructions each time.
+  and cost (a short answer was about $0.03 in the review after Phase 6).
 - It needs Claude Code installed and signed in (`claude` on PATH, or the
   native installer's `~/.local/bin`).
 - Pages opened from another machine (`--allow-host`) don't get the panel

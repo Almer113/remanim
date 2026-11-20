@@ -61,6 +61,19 @@ def _same_server(origin: str, host: str) -> bool:
     return scheme in ("http", "https") and same and port(rest) == port(host)
 
 
+PROXY_HEADERS = ("X-Forwarded-For", "X-Forwarded-Host", "Forwarded", "Tailscale-User-Login")
+
+
+def proxied(req) -> bool:
+    """Came through a proxy (tailscale serve): another machine, whatever its
+    Host header says. A browser on this machine never sends these."""
+    return any(h in req.headers for h in PROXY_HEADERS)
+
+
+def is_local(req) -> bool:
+    return _host_name(req.host or "") in LOCAL_HOSTS and not proxied(req)
+
+
 @web.middleware
 async def local_only(req: web.Request, handler):
     """Opening a file runs it and edits write code, so only this machine's
@@ -70,7 +83,7 @@ async def local_only(req: web.Request, handler):
     if not _known_host(name):
         raise web.HTTPForbidden(text="the studio only answers on localhost")
     set_cookie = False
-    if name not in LOCAL_HOSTS:
+    if not is_local(req):
         # another machine (a tailnet name): only with the start-up link's token
         given = req.cookies.get(TOKEN_COOKIE) or ""
         if not (ACCESS_TOKEN and hmac.compare_digest(given, ACCESS_TOKEN)):
@@ -204,7 +217,7 @@ class Hub:
         class Handler(FileSystemEventHandler):
             def on_any_event(self, event):
                 for p in (getattr(event, "src_path", None), getattr(event, "dest_path", None)):
-                    if p and str(p).endswith(".py"):
+                    if p and (str(p).endswith(".py") or Path(str(p)).name == "manim.cfg"):
                         hub.loop.call_soon_threadsafe(hub._changed, str(p))
 
         self.observer = Observer()
@@ -218,16 +231,18 @@ class Hub:
         except ValueError:
             return
         doc = self.docs.get(name)
+        # a module that open files import (style.py, manim_kit.py, or another open
+        # file with a shared base class), or manim.cfg: their engines restart
+        cfg = Path(path).name == "manim.cfg"
+        for d in list(self.docs.values()):
+            if d is not doc and (cfg or d.depends_on(Path(path))):
+                key = "dep:" + d.name
+                h = self._debounce.pop(key, None)
+                if h:
+                    h.cancel()
+                self._debounce[key] = self.loop.call_later(
+                    0.3, lambda d=d: asyncio.ensure_future(d.deps_changed()))
         if doc is None:
-            # a module that open files import (style.py, manim_kit.py): their engines restart
-            for d in list(self.docs.values()):
-                if d.depends_on(Path(path)):
-                    key = "dep:" + d.name
-                    h = self._debounce.pop(key, None)
-                    if h:
-                        h.cancel()
-                    self._debounce[key] = self.loop.call_later(
-                        0.3, lambda d=d: asyncio.ensure_future(d.deps_changed()))
             return
         h = self._debounce.pop(name, None)
         if h:
@@ -399,11 +414,11 @@ async def status(req):
                               "restarts": doc.worker.restarts})
 
 
-def gate(msg: dict, host: str) -> dict | None:
+def gate(msg: dict, host: str, via_proxy: bool = False) -> dict | None:
     """The reply refusing a message this page may not send, or None. Pages
-    reached through an --allow-host name (another machine) may not open
-    windows here, nor run Claude Code unless --allow-claude-remote."""
-    local = _host_name(host) in LOCAL_HOSTS
+    reached through an --allow-host name or a proxy (another machine) may not
+    open windows here, nor run Claude Code unless --allow-claude-remote."""
+    local = _host_name(host) in LOCAL_HOSTS and not via_proxy
     t = str(msg.get("type", ""))
     if t == "export.reveal" and not local:
         return {"type": "error", "message": "show in folder works on the studio's own computer only"}
@@ -424,7 +439,7 @@ async def ws_handler(req):
                 continue
             try:
                 msg = json.loads(m.data)
-                reply = gate(msg, req.host) or await handle(msg)
+                reply = gate(msg, req.host, proxied(req)) or await handle(msg)
             except web.HTTPException as e:
                 reply = {"type": "error", "message": e.text}
             except Exception as e:  # never drop the socket over one bad message
@@ -569,6 +584,7 @@ async def on_cleanup(app):
     if hub.spare is not None:
         hub.spare.close()
     hub.claude.close()
+    hub.exporter.close()
     for d in hub.docs.values():
         d.close()
 

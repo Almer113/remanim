@@ -336,11 +336,16 @@ export function App() {
   }, [toast]);
 
   // one edit at a time, and none while a preview waits for an answer
+  // inFlight is set at once, not on the next render: two sends from one render
+  // (a nudge flushed by a key, then that key's own edit) can't both go out
+  const inFlight = useRef(false);
   const sendEdit = useCallback((msg: object): Promise<any> | null => {
-    if (!model || !scene || busy || preview) return null;
+    if (!model || !scene || busy || preview || inFlight.current) return null;
+    inFlight.current = true;
     setBusy(true);
     // at: the playhead, so the edit's own replay can also hand back the frame shown next
     return conn.request({ at: f, ...msg, file: model.file, scene: scene.name, rev: model.rev }).then((r) => {
+      inFlight.current = false;
       handleReply(r);
       return r;
     });
@@ -456,41 +461,83 @@ export function App() {
   }, [toast]);
 
   const undoRedo = useCallback((which: "undo" | "redo") => {
-    if (!model || busy || preview || !(which === "undo" ? model.undo : model.redo)) return;
+    // a nudge not sent yet is the newest change: undo just drops it
+    if (which === "undo" && nudgeRef.current) { dropNudge(); return; }
+    if (!model || busy || preview || inFlight.current || !(which === "undo" ? model.undo : model.redo)) return;
+    inFlight.current = true;
     setBusy(true);
-    conn.request({ type: which, file: model.file }).then(handleReply);
+    conn.request({ type: which, file: model.file }).then((r) => { inFlight.current = false; handleReply(r); });
   }, [model, busy, preview, handleReply]);
 
   // -- keyboard (the table is in keymap.ts) ------------------------------------------
   // Arrow nudges add up while the key is held and go out as one edit (one undo step)
   // once the keys rest for a moment.
-  const nudgeRef = useRef<{ dx: number; dy: number; obj: Obj; f: number; timer: number } | null>(null);
+  // The send goes through the newest sendEdit (busy, rev, file as they are now,
+  // not as they were at the key press). Presses made while an edit verifies keep
+  // adding up and go out once it's done; releasing the key sends at once.
+  const nudgeRef = useRef<{ dx: number; dy: number; obj: Obj; f: number; file: string; scene: string; timer: number } | null>(null);
   const [nudge, setNudge] = useState<{ dx: number; dy: number } | null>(null);
-  const flushNudge = useCallback(() => {
+  const live = useRef({ sendEdit, busy, preview, file: model?.file, scene: scene?.name });
+  live.current = { sendEdit, busy, preview, file: model?.file, scene: scene?.name };
+  const dropNudge = useCallback(() => {
     const n = nudgeRef.current;
     nudgeRef.current = null;
     setNudge(null);
+    if (n) window.clearTimeout(n.timer);
+  }, []);
+  const flushNudge = useCallback(() => {
+    const n = nudgeRef.current;
     if (!n) return;
     window.clearTimeout(n.timer);
+    const now = live.current;
+    if (now.file !== n.file || now.scene !== n.scene) { dropNudge(); return; }  // moved on: it's gone
+    if (now.busy || now.preview) { n.timer = window.setTimeout(flushNudge, 150); return; }  // after the edit in flight
+    dropNudge();
     const r = (v: number) => Math.round(v * 10000) / 10000;
-    if (r(n.dx) || r(n.dy)) sendEdit({ type: "edit.move", object: n.obj, f: n.f, dx: r(n.dx), dy: r(n.dy) });
-  }, [sendEdit]);
+    if (r(n.dx) || r(n.dy)) now.sendEdit({ type: "edit.move", object: n.obj, f: n.f, at: n.f, dx: r(n.dx), dy: r(n.dy) });
+  }, [dropNudge]);
+  useEffect(() => dropNudge, [model?.file, scene?.name, dropNudge]);  // another file or scene, or unmount
+  useEffect(() => {
+    const up = (e: KeyboardEvent) => { if (e.key.startsWith("Arrow") && nudgeRef.current) flushNudge(); };
+    const blur = () => { if (nudgeRef.current) flushNudge(); };
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => { window.removeEventListener("keyup", up); window.removeEventListener("blur", blur); };
+  }, [flushNudge]);
+  // like objReady, but an edit still verifying doesn't stop the presses adding up
+  const canNudge = ready && !preview && !err && rest && !playing && sel?.kind === "object" && selOnScreen;
   const doNudge = useCallback((ux: number, uy: number, e: KeyboardEvent) => {
-    if (sel?.kind !== "object") return;
-    if (!objReady) { if (canEdit) offScreenNote(); return; }
+    if (sel?.kind !== "object" || !model || !scene) return;
+    if (!canNudge) { if (canEdit) offScreenNote(); return; }
     if (objLocked || sel.obj.virtual) { toast("info", "This one can't be moved from the studio"); return; }
     if (sel.obj.proj) { toast("info", "In a 3D scene, drag the object on the canvas"); return; }
     let n = nudgeRef.current;
-    if (n && n.obj.id !== sel.obj.id) { flushNudge(); n = null; }
-    n = n ?? { dx: 0, dy: 0, obj: sel.obj, f, timer: 0 };
+    if (n && n.obj.id !== sel.obj.id) { flushNudge(); n = nudgeRef.current; }
+    if (n && n.obj.id !== sel.obj.id) return;  // the other object's nudge waits for an edit: one at a time
+    n = n ?? { dx: 0, dy: 0, obj: sel.obj, f, file: model.file, scene: scene.name, timer: 0 };
     const step = nudgeStep(e);
     n.dx += ux * step;
     n.dy += uy * step;
     window.clearTimeout(n.timer);
-    n.timer = window.setTimeout(flushNudge, 450);
+    n.timer = window.setTimeout(flushNudge, 800);  // longer than the keyboard's repeat delay
     nudgeRef.current = n;
     setNudge({ dx: n.dx, dy: n.dy });
-  }, [sel, objReady, canEdit, objLocked, f, flushNudge, toast]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sel, canNudge, canEdit, objLocked, f, flushNudge, toast, model, scene]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // an overlay with keys of its own is open: the timeline's R / M stay off too
+  useEffect(() => {
+    document.body.toggleAttribute("data-overlay", !!(partPick || textEdit || camCanvas));
+  }, [partPick, textEdit, camCanvas]);
+
+  // the header's height (it wraps on narrow windows): side panels start below it
+  const barRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => document.documentElement.style.setProperty("--bar-h", `${el.offsetHeight}px`));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const [helpOpen, setHelpOpen] = useState(false);
   useEffect(() => {
@@ -501,7 +548,13 @@ export function App() {
       if ((e.key === " " || e.key === "Enter") && (e.target as HTMLElement)?.getAttribute?.("role") === "button") return;
       // picking glyphs, editing text in place, moving the camera, a dialog: their own keys only
       // (each closes itself on Escape); Delete must not delete the object under them
-      if (partPick || textEdit || camCanvas || exportOpen) return;
+      // Alt+← / Alt+→ is the browser's Back / Forward: never leave the studio by a missed nudge
+      if (e.altKey && e.key.startsWith("Arrow")) e.preventDefault();
+      if (exportOpen) {  // the dialog's own keys; Escape closes it even when focus fell to the page
+        if (e.key === "Escape") { e.preventDefault(); setExportOpen(false); }
+        return;
+      }
+      if (partPick || textEdit || camCanvas) return;
       if (helpOpen) {
         if (e.key === "Escape" || e.key === "?") { e.preventDefault(); setHelpOpen(false); }
         return;
@@ -515,6 +568,10 @@ export function App() {
       const action = actionFor(e, sel?.kind === "object");
       if (!action || action === "ripple" || action === "marker") return;  // those two: the timeline's
       e.preventDefault();
+      // a held key repeats only steps and nudges (not play, duplicate, delete, undo…)
+      if (e.repeat && !/^(nudge|back|forward)/.test(action)) return;
+      // another edit after a nudge that hasn't gone out yet: the nudge goes first
+      if (nudgeRef.current && /^(duplicate|group|delete)$/.test(action)) { flushNudge(); toast("info", "The nudge went first; press it again"); return; }
       const clipStarts = () => [...new Set((scene?.clips ?? []).map((c) => Math.round(c.start * fps)))].sort((x, y) => x - y);
       switch (action) {
         case "play": if (ready) togglePlay(); break;
@@ -543,7 +600,7 @@ export function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup, doNudge, partPick, textEdit, // eslint-disable-line react-hooks/exhaustive-deps
-    camCanvas, exportOpen, helpOpen, sel, scene, model]);
+    camCanvas, exportOpen, helpOpen, sel, scene, model, flushNudge, toast]);
 
   // the dialog takes the focus (not a button: a second Enter from the field
   // must not answer it unread); Tab reaches the buttons, Escape cancels
@@ -554,7 +611,7 @@ export function App() {
 
   return (
     <div className="app">
-      <header className="bar">
+      <header className="bar" ref={barRef}>
         <strong className="brand">Manim Studio</strong>
         <select className="file-pick" value={file} onChange={(e) => setFile(e.target.value)} title="Scene file">
           <option value="" disabled>Open a scene file…</option>
@@ -597,9 +654,9 @@ export function App() {
         {busyEngine && <BusyEngine busy={busyEngine} onStop={() => conn.request({ type: "stop", file: model?.file })
           .then((r) => { if (r.type === "stopped") toast("info", `stopped ${r.scene ?? "loading the file"}; it's skipped until you save the file`); })}
           tick={() => setTick((n) => n + 1)} />}
-        {model?.census && <span className="pill" title="Statements by tier (code_spec §2)">tier 1 {model.census.pct["1"]}% · 2 {model.census.pct["2"]}% · 3 {model.census.pct["3"]}%</span>}
-        {model && <span className="pill">rev {model.rev}</span>}
-        {nudge && <span className="pill warm" title="Arrow keys add up; the move is written when you stop">nudge {nudge.dx >= 0 ? "+" : ""}{nudge.dx.toFixed(2)}, {nudge.dy >= 0 ? "+" : ""}{nudge.dy.toFixed(2)}</span>}
+        {model?.census && <span className="pill tier" title="Statements by tier (code_spec §2)">tier 1 {model.census.pct["1"]}% · 2 {model.census.pct["2"]}% · 3 {model.census.pct["3"]}%</span>}
+        {model && <span className="pill keep">rev {model.rev}</span>}
+        {nudge && <span className="pill warm keep" title="Arrow keys add up; the move is written when you stop">nudge {nudge.dx >= 0 ? "+" : ""}{nudge.dx.toFixed(2)}, {nudge.dy >= 0 ? "+" : ""}{nudge.dy.toFixed(2)}</span>}
         {(() => {
           const run = jobs.find((j) => RUNNING.has(j.state));
           return run && <button className="pill warm" onClick={() => setExportOpen(true)} title="Export running">⏺ {jobLine(run)}</button>;
@@ -741,16 +798,18 @@ export function App() {
               <button onClick={cancelPreview}>Cancel</button>
               {preview.alts.map((a) => (
                 <button key={a.token} onClick={() => {
+                  inFlight.current = true;
                   setBusy(true);
                   conn.send({ type: "edit.cancel", file: model?.file, token: preview.token });
-                  conn.request({ type: "edit.confirm", file: model?.file, token: a.token }).then(handleReply);
+                  conn.request({ type: "edit.confirm", file: model?.file, token: a.token }).then((r) => { inFlight.current = false; handleReply(r); });
                   setPreview(null);
                 }}>{a.label}</button>
               ))}
               <button className="pri" onClick={() => {
+                inFlight.current = true;
                 setBusy(true);
                 for (const a of preview.alts) conn.send({ type: "edit.cancel", file: model?.file, token: a.token });
-                conn.request({ type: "edit.confirm", file: model?.file, token: preview.token }).then(handleReply);
+                conn.request({ type: "edit.confirm", file: model?.file, token: preview.token }).then((r) => { inFlight.current = false; handleReply(r); });
                 setPreview(null);
               }}>{preview.alts.length ? "Every one" : "Apply"}</button>
             </div>

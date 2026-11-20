@@ -25,6 +25,8 @@ export class Conn {
       this.onStatus(true);
       this.onOpen();
       for (const q of this.queue.splice(0)) ws.send(q);
+      // for parts that must ask again after a reconnect (what they missed meanwhile)
+      for (const l of [...this.listeners]) l({ type: "conn.open" });
     };
     ws.onclose = () => {
       this.onStatus(false);
