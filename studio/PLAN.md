@@ -252,6 +252,15 @@ Export dialog (quality, format, joined video). Keyboard shortcuts. Performance
 passes. Error and recovery UX. Docs. Optional: desktop wrapper, a Claude panel,
 a real name and licence for open-sourcing.
 
+**Status (2026-11-20): built; exit check done** (`docs/phase6/exit_report.md`).
+Plan in `docs/phase6/plan.md`, speed in `docs/phase6/baseline.md`, error
+catalogue in `docs/phase6/errors.md`. All four exit criteria met: a narrated
+video made and exported (`-ql`, `-qh`) from a blank file in the studio, speed
+targets met (reopen over 3 s on two big files), every catalogue row tried, a
+fresh clone starts from the README. Optional items built: the app window
+(`--app`) and the Claude panel. Open: undo's frame not seeded from the cache,
+a visible-pane UI frame-time measurement, name and licence.
+
 ## 6. Testing
 
 - **Round-trip suite:** for every corpus file: open → save is byte-identical;

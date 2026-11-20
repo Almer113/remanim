@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { tip } from "./keymap";
 import type { CameraState, Model, SceneModel } from "./types";
 import type { Selection } from "./App";
 import { EasingPicker } from "./Easing";
@@ -227,9 +228,9 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
         </>
       )}
       <div className="btns-row">
-        <button disabled={!!locked || busy || off || !!o.virtual} onClick={actions.duplicate} title="Duplicate (Ctrl+D)">Duplicate</button>
+        <button disabled={!!locked || busy || off || !!o.virtual} onClick={actions.duplicate} title={tip("duplicate")}>Duplicate</button>
         <button disabled={busy || off || actions.count < 2} onClick={actions.group}
-          title="Group the selection (Ctrl+G); Shift-click to add objects">Group{actions.count > 1 ? ` ${actions.count}` : ""}</button>
+          title={tip("group")}>Group{actions.count > 1 ? ` ${actions.count}` : ""}</button>
         <button disabled={!!locked || busy} onClick={actions.remove} title="Delete (Del)">Delete</button>
         {TEXT_KINDS.has(o.class) && (
           <button disabled={!!locked || busy || off || !actions.partColour} onClick={() => actions.partColour?.()}

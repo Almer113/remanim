@@ -7,6 +7,7 @@ import asyncio
 import hmac
 import re
 import json
+import os
 import threading
 import warnings
 from pathlib import Path
@@ -15,9 +16,14 @@ from aiohttp import WSMsgType, web
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from .export import Exporter, ExportError
+from .claude_panel import ClaudePanel
+from .host import WorkerHandle
 from .project import ROOT, Document, rel
 
 WEB = ROOT / "studio" / "web" / "dist"
+# tests and benches start engines themselves; a spare would only cost memory
+NO_SPARE = os.environ.get("STUDIO_NO_SPARE") == "1"
 SKIP_DIRS = {".venv", "media", "node_modules", ".git", "studio/server", "studio/spikes", "studio/web",
              "__pycache__", ".claude"}
 HIDDEN_DIRS = {"studio/tests/tmp"}  # copies the tests make: openable, but not listed
@@ -28,6 +34,9 @@ TRUSTED_HOSTS: set[str] = set()  # opt-in extra names (`--allow-host`), e.g. a t
 # a name other than localhost is reached by other machines: they need this token
 # (from the link printed at start-up, then a cookie); set by __main__ with --allow-host
 ACCESS_TOKEN = ""
+# the Claude panel runs an agent on this machine: pages from a trusted (tailnet) name
+# may use it only when the server was started with --allow-claude-remote
+CLAUDE_REMOTE = False
 TOKEN_COOKIE = "studio_token"
 
 
@@ -137,6 +146,22 @@ class Hub:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.observer: Observer | None = None
         self._debounce: dict[str, asyncio.TimerHandle] = {}
+        self.exporter = Exporter(self.notify)
+        self.claude = ClaudePanel(self.notify)
+        self.spare: WorkerHandle | None = None  # an engine started ahead: opening a file skips ~5 s
+
+    def take_spare(self) -> WorkerHandle | None:
+        """The waiting engine, if there is one; a new one starts for next time."""
+        w, self.spare = self.spare, None
+        if w is not None and (w.closed or w.proc is None or not w.proc.is_alive()):
+            w = None
+        if self.loop is not None:
+            self.loop.call_later(2.0, self._new_spare)
+        return w
+
+    def _new_spare(self):
+        if self.spare is None and not NO_SPARE:
+            self.spare = WorkerHandle("")
 
     async def notify(self, msg: dict):
         data = json.dumps(msg)
@@ -152,7 +177,7 @@ class Hub:
         if doc is not None:
             await doc.send_model()
             return doc
-        doc = Document(ROOT / name, [], self.notify)
+        doc = Document(ROOT / name, [], self.notify, worker=self.take_spare())
         self.docs[doc.name] = doc
         if self.api is None:
             r = await doc.worker.request({"op": "hello"})
@@ -194,6 +219,15 @@ class Hub:
             return
         doc = self.docs.get(name)
         if doc is None:
+            # a module that open files import (style.py, manim_kit.py): their engines restart
+            for d in list(self.docs.values()):
+                if d.depends_on(Path(path)):
+                    key = "dep:" + d.name
+                    h = self._debounce.pop(key, None)
+                    if h:
+                        h.cancel()
+                    self._debounce[key] = self.loop.call_later(
+                        0.3, lambda d=d: asyncio.ensure_future(d.deps_changed()))
             return
         h = self._debounce.pop(name, None)
         if h:
@@ -365,6 +399,21 @@ async def status(req):
                               "restarts": doc.worker.restarts})
 
 
+def gate(msg: dict, host: str) -> dict | None:
+    """The reply refusing a message this page may not send, or None. Pages
+    reached through an --allow-host name (another machine) may not open
+    windows here, nor run Claude Code unless --allow-claude-remote."""
+    local = _host_name(host) in LOCAL_HOSTS
+    t = str(msg.get("type", ""))
+    if t == "export.reveal" and not local:
+        return {"type": "error", "message": "show in folder works on the studio's own computer only"}
+    if t.startswith("claude.") and not (local or CLAUDE_REMOTE):
+        return {"type": "claude.status", "available": False, "busy": False,
+                "why": "the Claude panel is off for other machines (start the studio with "
+                       "--allow-claude-remote to allow it)"}
+    return None
+
+
 async def ws_handler(req):
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=64 * 1024 * 1024)
     await ws.prepare(req)
@@ -375,7 +424,7 @@ async def ws_handler(req):
                 continue
             try:
                 msg = json.loads(m.data)
-                reply = await handle(msg)
+                reply = gate(msg, req.host) or await handle(msg)
             except web.HTTPException as e:
                 reply = {"type": "error", "message": e.text}
             except Exception as e:  # never drop the socket over one bad message
@@ -430,6 +479,23 @@ async def handle(msg: dict) -> dict | None:
         return None
     if t == "file.new":  # needs no open file
         return await new_file(msg)
+    if t == "export.cancel":
+        return await hub.exporter.cancel(str(msg.get("id", "")))
+    if t == "claude.status":
+        return hub.claude.status()
+    if t == "claude.ask":
+        ctx = msg.get("context") if isinstance(msg.get("context"), dict) else {}
+        return await hub.claude.ask(str(msg.get("prompt") or ""), ctx, msg.get("session"))
+    if t == "claude.stop":
+        return await hub.claude.stop()
+    if t == "export.reveal":
+        p = hub.exporter.file_of(str(msg.get("id", "")), _int(msg, "i", 0))
+        if p is None:
+            return {"type": "error", "message": "no such export file"}
+        reveal(p)
+        return {"type": "export.revealed"}
+    if t == "export.list":
+        return {"type": "export.jobs", "jobs": [j.view() for j in hub.exporter.jobs.values()]}
     doc = hub.docs.get(msg.get("file", ""))
     if doc is None:
         return {"type": "error", "message": "file not open"}
@@ -449,9 +515,38 @@ async def handle(msg: dict) -> dict | None:
     if t == "edit.cancel":
         doc.pending.pop(msg.get("token"), None)
         return {"type": "edit.cancelled"}
+    if t == "stop":
+        return await doc.stop()
     if t in ("undo", "redo"):
         return await doc.undo_redo(t)
+    if t == "export.start":
+        if not doc.meta.get("scenes"):
+            return {"type": "error", "message": "the file has no scenes that run yet"}
+        try:
+            return await hub.exporter.start(doc.name, msg.get("spec") or {}, list(doc.meta["scenes"]))
+        except ExportError as e:
+            return {"type": "error", "message": str(e)}
     return {"type": "error", "message": f"unknown message {t}"}
+
+
+def reveal(p):
+    """Show a file in the system's file manager, selected where it can be."""
+    import subprocess
+    import sys
+    if sys.platform == "win32":
+        subprocess.Popen(["explorer", f"/select,{p}"])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(p)])
+    else:
+        subprocess.Popen(["xdg-open", str(p.parent)])
+
+
+async def export_file(req: web.Request):
+    """A file an export made, by job and index (never a path from the client)."""
+    p = hub.exporter.file_of(req.query.get("job", ""), _int(req.query, "i", 0))
+    if p is None:
+        raise web.HTTPNotFound(text="no such export file")
+    return web.FileResponse(p, headers={"Cache-Control": "no-cache"})
 
 
 async def index(req):
@@ -465,11 +560,15 @@ async def index(req):
 async def on_startup(app):
     hub.loop = asyncio.get_running_loop()
     hub.start_watching()
+    hub._new_spare()
 
 
 async def on_cleanup(app):
     if hub.observer:
         hub.observer.stop()
+    if hub.spare is not None:
+        hub.spare.close()
+    hub.claude.close()
     for d in hub.docs.values():
         d.close()
 
@@ -486,6 +585,7 @@ def make_app() -> web.Application:
     app.router.add_get("/audio", sound)
     app.router.add_get("/audio/peaks", sound_peaks)
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/export/file", export_file)
     if (WEB / "assets").exists():
         app.router.add_static("/assets", WEB / "assets")
     app.on_startup.append(on_startup)

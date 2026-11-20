@@ -76,6 +76,9 @@ class TimedScene(VoiceoverScene):
 
     @contextmanager
     def say(self, text: str, caption: str | None = None):
+        if not self.VOICE:
+            raise ValueError(f"{type(self).__name__}.VOICE is None; set a voice "
+                             "(e.g. VOICE = \"en-US-AndrewNeural\") to narrate")
         now = self.renderer.time
         start = max(now, getattr(self, "_voice_free", 0.0))
         data = self.speech_service._wrap_generate_from_text(text)

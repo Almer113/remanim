@@ -1,8 +1,74 @@
 """Run the studio:  .venv/Scripts/python -m studio.server [--port 8770]"""
 
 import argparse
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from pathlib import Path
 
 from aiohttp import web
+
+
+def port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def ui_note() -> str | None:
+    """Whether the built UI is there and up to date with web/src."""
+    from .app import ROOT, WEB
+    src = ROOT / "studio" / "web" / "src"
+    built = WEB / "index.html"
+    if not built.exists():
+        return "the web UI isn't built: run `npm install` once, then `npm run build`, in studio/web"
+    newest = max((p.stat().st_mtime for p in src.rglob("*") if p.is_file()), default=0)
+    if newest > built.stat().st_mtime + 1:
+        return "the built UI is older than studio/web/src: run `npm run build` in studio/web to see the changes"
+    return None
+
+
+def app_browser() -> str | None:
+    """Edge or Chrome, for an app window (--app): no tabs or address bar."""
+    for name in ("msedge", "chrome", "google-chrome", "chromium"):
+        exe = shutil.which(name)
+        if exe:
+            return exe
+    for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA")):
+        for rel in (r"Microsoft\Edge\Application\msedge.exe", r"Google\Chrome\Application\chrome.exe"):
+            if base and (Path(base) / rel).is_file():
+                return str(Path(base) / rel)
+    return None
+
+
+def open_app_window(url: str, background: bool = True):
+    """Once the server answers, open it as an app window."""
+    exe = app_browser()
+    if exe is None:
+        print(f"No Edge or Chrome found for an app window; open {url} in a browser.", flush=True)
+        return
+
+    def go():
+        for _ in range(100):
+            try:
+                urllib.request.urlopen(url + "api/status", timeout=1).close()
+                break
+            except Exception:
+                time.sleep(0.2)
+        subprocess.Popen([exe, f"--app={url}", "--window-size=1500,950"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if background:
+        threading.Thread(target=go, daemon=True).start()
+    else:
+        go()
 
 
 def main():
@@ -12,20 +78,37 @@ def main():
                     help="also answer to this host name (e.g. a `tailscale serve` name); "
                          "the server still listens on 127.0.0.1 only, and other machines need "
                          "the token link printed at start-up. Never point `tailscale funnel` at it")
+    ap.add_argument("--allow-claude-remote", action="store_true",
+                    help="let pages opened through an --allow-host name use the Claude panel "
+                         "(it runs Claude Code on this machine); off by default")
+    ap.add_argument("--app", action="store_true",
+                    help="open the studio in its own window (Edge or Chrome in app mode)")
     ap.add_argument("--dev", action="store_true",
                     help="let the vite dev server (npm run dev, port 5173) call the studio")
     args = ap.parse_args()
     from . import app
     from .app import make_app
     app.TRUSTED_HOSTS.update(h.strip().lower() for h in args.allow_host if h.strip())
+    app.CLAUDE_REMOTE = args.allow_claude_remote
     if args.dev:
         app.DEV_ORIGINS.update(app.VITE_ORIGINS)
+    if not port_free(args.port):
+        if args.app:  # already running: just open another window onto it
+            open_app_window(f"http://127.0.0.1:{args.port}/", background=False)
+            return
+        sys.exit(f"Port {args.port} is in use: the studio is probably running already "
+                 f"(open http://127.0.0.1:{args.port}), or start this one with --port <another>.")
+    note = ui_note()
+    if note:
+        print(f"Note: {note}", flush=True)
     print(f"Manim Studio on http://127.0.0.1:{args.port}", flush=True)
     if app.TRUSTED_HOSTS:
         import secrets
         app.ACCESS_TOKEN = secrets.token_urlsafe(24)
         for h in sorted(app.TRUSTED_HOSTS):
             print(f"  from other machines: https://{h}:{args.port}/?token={app.ACCESS_TOKEN}", flush=True)
+    if args.app:
+        open_app_window(f"http://127.0.0.1:{args.port}/")
     web.run_app(make_app(), host="127.0.0.1", port=args.port, print=None)
 
 

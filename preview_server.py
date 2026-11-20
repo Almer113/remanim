@@ -33,6 +33,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "tools"))
+from render_lock import held as render_lock  # noqa: E402  (the studio's export takes the same lock)
+
 ROOT = Path(__file__).resolve().parent
 MEDIA_ROOT = ROOT / "media"
 MEDIA = MEDIA_ROOT / "videos"
@@ -52,6 +55,7 @@ state = {
     "log": "",
     "started": None,
     "finished": None,
+    "waiting": None,  # who else is rendering this file, while we wait for them
 }
 pending: set[str] = set()
 wake = threading.Event()
@@ -178,11 +182,20 @@ def render(file: str) -> None:
         q = state["quality"]
         state.update(status="rendering", file=file, log="", started=time.time())
         state["version"] += 1
-    keep_previous(file, q)
-    cmd = [sys.executable, str(ROOT / "tools" / "timeline_render.py"), "render", f"-q{q}", "-a", file]
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", COLUMNS="200")
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", env=env)
+    def waiting(who: dict) -> None:
+        with lock:
+            state["waiting"] = who.get("owner") or "another process"
+            state["version"] += 1
+
+    with render_lock(Path(file).stem, "preview server", on_wait=waiting):
+        with lock:
+            state["waiting"] = None
+            state["version"] += 1
+        keep_previous(file, q)
+        cmd = [sys.executable, str(ROOT / "tools" / "timeline_render.py"), "render", f"-q{q}", "-a", file]
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", COLUMNS="200")
+        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env=env)
     log = (proc.stdout + "\n" + proc.stderr).strip()
     with lock:
         state.update(status="ok" if proc.returncode == 0 else "error",
@@ -417,7 +430,7 @@ async function tick(){
   if($("file").innerHTML!==opts) $("file").innerHTML=opts;
   $("quality").value=s.quality;
   $("status").className="pill "+s.status;
-  $("statusText").textContent=s.status==="rendering"?`rendering ${s.file}…`:s.status;
+  $("statusText").textContent=s.status==="rendering"?(s.waiting?`waiting for ${s.waiting} to finish ${s.file}…`:`rendering ${s.file}…`):s.status;
   $("time").textContent=s.finished&&s.status!=="rendering"?`${((s.finished-s.started)).toFixed(1)}s · ${new Date(s.finished*1000).toLocaleTimeString()}`:"";
   const busy=s.status==="rendering"&&s.file===s.current;
   const key=JSON.stringify([s.version,s.videos.map(v=>[v.url,v.prev,v.outdated]),s.status,busy]);

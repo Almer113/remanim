@@ -98,7 +98,9 @@ export interface Model {
   height: number;
   frame_width?: number;   // scene units across the frame (14.22 by default)
   frame_height?: number;
-  error: { code: string; message: string; line: number | null } | null;
+  error: { code: string; message: string; line: number | null; traceback?: string } | null;
+  /** The file doesn't run: the scenes are those of the last version that did (read-only). */
+  stale?: boolean;
   census: { statements: number; pct: Record<string, number> } | null;
   active: string | null;
   undo: boolean;

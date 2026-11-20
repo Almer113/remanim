@@ -183,6 +183,11 @@ def _latex_detail(message: str) -> str | None:
     try:
         lines = Path(m.group(1).strip()).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
+        import shutil
+        if shutil.which("latex") is None:
+            # no log because LaTeX never ran: the environment, not the formula
+            return ("LaTeX isn't installed or isn't on PATH (MiKTeX or TeX Live); "
+                    "Text() works without it")
         return None
     for i, ln in enumerate(lines):
         if ln.startswith("!"):

@@ -88,6 +88,15 @@ class WorkerHandle:
             if not self.proc.is_alive():
                 raise WorkerDied(f"the engine process exited (code {self.proc.exitcode})")
 
+    async def fresh(self):
+        """Replace the process with a new one, after any request in flight:
+        a module the scene imports changed, and Python keeps the old one."""
+        async with self.lock:
+            if self.closed:
+                return
+            await asyncio.to_thread(self.kill)
+            self._start()
+
     async def request(self, msg: dict, background: bool = False) -> dict:
         counted = not background
         if counted:

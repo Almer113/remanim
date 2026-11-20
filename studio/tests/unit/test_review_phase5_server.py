@@ -91,3 +91,11 @@ def test_matching_transform_key_map_given_positionally():
                          cwd=str(app.ROOT))
     assert out.returncode == 0, out.stderr[-800:]
     assert "{'a': 'b'}" in out.stdout
+
+
+def test_latex_missing_is_named(tmp_path, monkeypatch):
+    import shutil
+    from studio.server.engine.runtime import _latex_detail
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    got = _latex_detail(f"latex error converting to dvi. See log file: {tmp_path / 'never.log'}")
+    assert got and "isn't installed" in got

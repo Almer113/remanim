@@ -220,3 +220,67 @@ button.ghost { background: transparent; border-color: transparent; padding: 0 4p
 .camera-layer .orbit { position: absolute; right: 8px; bottom: 8px; pointer-events: none; }
 .warn { color: var(--warm); font-size: 11px; }
 .btns-row button.on { border-color: var(--sel); }
+
+/* export dialog (Phase 6 step 5) */
+.modal.export { width: min(760px, 94vw); max-height: 90vh; overflow: auto; }
+.export-grid { display: grid; grid-template-columns: 90px 1fr; gap: 8px 12px; align-items: start; margin: 8px 0; }
+.export-grid > label { color: var(--dim); padding-top: 3px; }
+.export .opt { display: block; padding: 2px 0; }
+.export .opt.muted { opacity: 0.55; }
+.export-pick { max-height: 160px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 4px 0; columns: 2; }
+.export .note.warn { color: var(--warm); }
+.export .note.bad { color: var(--bad); }
+.export-h { margin-top: 14px; }
+.export-jobs { display: flex; flex-direction: column; gap: 8px; }
+.export-job { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+.export-job.failed { border-color: #6b2e27; }
+.export-job.done { border-color: #2d5a3f; }
+.export-job .row { display: flex; gap: 10px; align-items: center; }
+.export-job progress { width: 100%; height: 6px; }
+.export-job ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+.export-job li.failed { color: var(--bad); }
+.export-job li .small, .export-player .small { margin-left: 6px; padding: 0 6px; font-size: 11px; }
+.export-job pre { max-height: 200px; overflow: auto; font-size: 11px; white-space: pre-wrap; }
+.export-job details.bad summary { color: var(--bad); }
+.export-job details.ok summary { color: var(--ok); }
+.export-player { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.export-player .row { display: flex; align-items: center; }
+.export-player video, .export-player img { width: 100%; max-height: 50vh; background: #000; }
+button.pill { cursor: pointer; background: transparent; }
+
+/* keyboard help sheet (Phase 6 step 6) */
+.modal.help { width: min(820px, 94vw); max-height: 90vh; overflow: auto; }
+.help-cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 6px 18px; }
+.help table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.help th { text-align: left; color: var(--dim); font-weight: 600; padding: 8px 0 3px; }
+.help td { padding: 2px 0; vertical-align: top; }
+.help td:first-child { white-space: nowrap; padding-right: 10px; width: 1%; }
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; margin-right: 3px; font-family: inherit; font-size: 11px; }
+.errbar .err-code { margin: 4px 0; padding: 4px 6px; background: #0004; border-radius: 4px; font-size: 12px; overflow-x: auto; color: #f6d2cc; }
+.errbar details pre { max-height: 180px; overflow: auto; font-size: 11px; white-space: pre-wrap; }
+.errbar .muted { color: #d99f96; font-size: 12px; }
+
+/* Claude panel (Phase 6 optional) */
+.claude { position: fixed; right: 10px; top: 46px; bottom: 10px; width: min(400px, 92vw); z-index: 40; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+.claude[hidden] { display: none; }
+.claude-head { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.claude-head .muted { font-size: 11px; color: var(--dim); }
+.claude-log { flex: 1; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.claude-note { color: var(--dim); font-size: 12px; }
+.claude-note.bad, .claude-result.bad { color: var(--bad); }
+.claude-you { align-self: flex-end; max-width: 90%; background: var(--clip); border-radius: 8px; padding: 6px 9px; white-space: pre-wrap; }
+.claude-where { font-size: 10px; color: var(--dim); margin-bottom: 2px; }
+.claude-text { white-space: pre-wrap; line-height: 1.45; }
+.claude-tool { font-size: 11px; color: var(--dim); font-family: var(--mono); }
+.claude-result { font-size: 11px; color: var(--ok); }
+.claude-result pre { white-space: pre-wrap; font-size: 11px; margin: 4px 0 0; color: var(--dim); }
+.claude-ask { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--line); align-items: flex-end; }
+.claude-ask textarea { flex: 1; resize: none; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 5px 7px; }
+
+/* the longest path in the list would set the picker's width */
+.bar .file-pick { max-width: 240px; text-overflow: ellipsis; }
+/* pills give up width (ellipsis) before the header wraps, e.g. when an export pill appears */
+.bar .pill { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+@media (min-width: 1100px) { .bar { flex-wrap: nowrap; } }
+.bar > button, .bar > strong, .bar > select { white-space: nowrap; flex-shrink: 0; }

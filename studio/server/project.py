@@ -13,6 +13,7 @@ import hashlib
 import math
 import re
 import secrets
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,7 @@ from .code import timeline
 from .code.census import classify, summary
 from .code.source import Source, Span
 from .code.splice import Edit, EditError, apply, number_of, write_atomic
+from . import tracecache
 from .host import WorkerHandle
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -128,7 +130,7 @@ def _tts_failed(err: dict) -> bool:
 
 
 class Document:
-    def __init__(self, path: Path, api: list[str], notify):
+    def __init__(self, path: Path, api: list[str], notify, worker: WorkerHandle | None = None):
         self.path = path.resolve()
         self.name = rel(self.path)
         self.api = set(api)
@@ -136,7 +138,11 @@ class Document:
         self.data = self.path.read_bytes()
         self.rev = 0
         self.src = Source(self.data)
-        self.worker = WorkerHandle(str(self.path), on_restart=self._restarted)
+        if worker is not None:  # a spare engine, already started (Hub.take_spare)
+            worker.path, worker.on_restart = str(self.path), self._restarted
+            self.worker = worker
+        else:
+            self.worker = WorkerHandle(str(self.path), on_restart=self._restarted)
         self.meta: dict = {}           # scenes, fps, size
         self.traces: dict[str, dict] = {}
         self.error: dict | None = None
@@ -149,6 +155,8 @@ class Document:
         self.load_lock = asyncio.Lock()
         self.last_write: bytes | None = None
         self.prefetch_task: asyncio.Task | None = None
+        self.tracing: tuple[str, float] | None = None   # (scene, or "" for the module; start)
+        self._stopped: dict[bytes, set] = {}               # bytes → what the user stopped in them
 
     # -- loading -------------------------------------------------------------
     async def load(self):
@@ -164,43 +172,138 @@ class Document:
         self.rev += 1
         self.pending.clear()  # planned against the old bytes
         self.src = Source(self.data)
-        self.traces = {}
         self.error = None
+        # cleared first: a reply waiting on this reload (_reload_for_reply) must not
+        # take the old revision's traces for the new one
+        self.traces = {}
+        # While the file doesn't run, the studio keeps showing the last version
+        # that did (self.good: its bytes, source, meta and traces; the worker
+        # keeps that engine loaded), read-only, beside the error.
+        good = getattr(self, "good", None)
         if not self.src.ok:
             e = self.src.error
             self.error = {"code": "parse", "message": f"SyntaxError: {e.msg}", "line": e.lineno}
+            self._show_good(good)
             await self.send_model()
             return
-        r = await self.worker.request({"op": "load", "data": self.data})
+        if self.data in self._stopped and "" in self._stopped[self.data]:
+            r = {"error": {"code": "stopped", "line": None, "message": "stopped: the file ran too long while "
+                                                                       "loading (an endless loop?); fix it and save"}}
+        else:
+            self.tracing = ("", time.monotonic())
+            await self.send_status()
+            r = await self._engine({"op": "load", "data": self.data, "path": str(self.path)})
+            self.tracing = None
+            await self.send_status()  # the UI's "loading…" pill ends here, whatever the outcome
         if "error" in r:
             self.error = {"code": "crash", **r["error"]}
+            if self.data in self._stopped and "" in self._stopped[self.data]:
+                self.error.update(code="stopped", message="stopped: the file ran too long while loading "
+                                                          "(an endless loop?); fix it and save")
+            if good is not None and (r["error"].get("restarted") or self.error["code"] == "stopped"):
+                # the engine was replaced and holds nothing: load the version that ran
+                await self._engine({"op": "load", "data": good["data"]})
+            self._show_good(good)
             await self.send_model()
             return
+        self.traces = {}
+        self.good = {"data": self.data, "src": self.src, "meta": r, "traces": self.traces}
         self.meta = r
+        self.deps = list(r.get("deps") or [])
+        self._deps_digest = tracecache.deps_digest(self.path, self.deps)
         order = list(r["scenes"])
         if self.active in order:
             order.remove(self.active)
             order.insert(0, self.active)
         elif order:
             self.active = order[0]
+        # what needs no run first (cached traces, scenes the user stopped), all at once:
+        # one slow or endless scene must not hide the scenes that are ready
+        known = {}
+        for name in order:
+            t = tracecache.CACHE.get(self._trace_key(self.data, name))
+            if t is None and name in self._stopped.get(self.data, ()):
+                t = {"name": name, "events": [], "duration": 0, "bases": [], "error": {
+                    "code": "stopped", "line": None, "message": "stopped: this scene ran too long (an endless "
+                                                                "loop?); fix it and save to try again"}}
+            if t is not None:
+                known[name] = t
+        if known:
+            self.traces.update(known)
+            await self.send_model()
+            if self.active in known:
+                await self.activate(self.active)
         for name in order:
             if gen != self._load_gen:
                 return  # superseded (another edit, undo or save): stop tracing old bytes
-            t = await self.worker.request({"op": "trace", "scene": name})
+            if name in known:
+                continue
+            self.tracing = (name, time.monotonic())
+            await self.send_status()
+            t = await self._engine({"op": "trace", "scene": name})
+            self.tracing = None
+            if gen != self._load_gen:
+                return  # superseded while tracing (a Stop, or new bytes): the newer load decides
             if "error" in t and "events" not in t:
                 t = {"name": name, "events": [], "duration": 0, "error": t["error"], "bases": []}
+            else:
+                tracecache.CACHE.put(self._trace_key(self.data, name), t)
             self.traces[name] = t
             if name == self.active:
                 await self.send_model()
                 await self.activate(name)
         await self.send_model()
+        await self.send_status()
+
+    def _show_good(self, good: dict | None):
+        if good is None:
+            self.traces = {}
+            return
+        self.meta, self.traces = good["meta"], good["traces"]
+
+    @property
+    def stale(self) -> bool:
+        """Showing the last version that ran, not the file as it is."""
+        good = getattr(self, "good", None)
+        return bool(self.error) and good is not None and good["data"] != self.data
+
+    def _trace_key(self, data: bytes, scene: str) -> str | None:
+        """Per scene: the code it can depend on (tracecache.scene_text), the
+        modules it imports, the engine. None when there's nothing safe to key on."""
+        d = getattr(self, "_deps_digest", None)
+        if not d or getattr(self, "_no_cache", False):
+            return None
+        src = self.src if data == self.data else Source(data)
+        if not src.ok:
+            return None
+        text = tracecache.scene_text(src.tree, data, scene, self.meta.get("scenes", []))
+        return tracecache.key(text, d, scene, self.worker.quality)
+
+    async def _engine(self, msg: dict, **kw) -> dict:
+        """Every engine request goes through here. A verify run traces the
+        edited bytes: kept, so the reload after the write needn't trace the
+        same scene again."""
+        at = getattr(self, "_edit_at", None)
+        if msg.get("op") == "verify" and at and msg.get("scene") == at[0] and msg.get("f", at[1]) == at[1]:
+            # the edit's own run draws the frame at the playhead too: after the write
+            # that is the frame the UI asks for first, so it needn't run the scene again
+            msg = {**msg, "f": at[1], "objects": True, "frame": True}
+        r = await self.worker.request(msg, **kw)
+        if msg.get("op") == "verify" and isinstance(r.get("trace"), dict) and msg.get("scene"):
+            k = self._trace_key(msg["data"], msg["scene"])
+            if k:
+                tracecache.CACHE.put(k, r["trace"])
+            fr = r.pop("frame", None)
+            if fr is not None:
+                self._verified_frame = (msg["data"], msg["scene"], msg["f"], fr)
+        return r
 
     async def activate(self, scene: str):
         self.active = scene
         tr = self.traces.get(scene)
         if tr is None:
             return
-        await self.worker.request({"op": "activate", "scene": scene, "duration": tr["duration"]})
+        await self._engine({"op": "activate", "scene": scene, "duration": tr["duration"]})
         if self.prefetch_task is None or self.prefetch_task.done():
             self.prefetch_task = asyncio.create_task(self.prefetch())
 
@@ -239,15 +342,26 @@ class Document:
         return max(1, int(round(tr["duration"] * fps)))
 
     # -- frames ---------------------------------------------------------------
+    def _never_ends(self, scene: str) -> dict | None:
+        """A scene that was stopped, or ran past the engine's deadline, would
+        do it again for every frame: those are refused, not run."""
+        err = (self.traces.get(scene) or {}).get("error") or {}
+        if err.get("code") in ("stopped", "timeout"):
+            return {"error": {"message": err.get("message") or "this scene doesn't finish", "code": err["code"]}}
+        return None
+
     async def frame(self, scene: str, f: int, size="full", fmt="png", ids=False, background=False):
         if scene not in self.traces:
             return {"error": {"message": f"no scene {scene!r} traced in this revision", "code": "scene"}}
+        never = self._never_ends(scene)
+        if never:
+            return never
         f = max(0, min(int(f), self.frame_count(scene) - 1))  # Manim never renders outside the scene
         key = (self.rev, scene, f, size, fmt)
         hit = self.frames.get(key)
         if hit is not None and (not ids or "idmap" in hit):
             return hit
-        r = await self.worker.request({"op": "frame", "scene": scene, "f": f, "ids": ids,
+        r = await self._engine({"op": "frame", "scene": scene, "f": f, "ids": ids,
                                        "size": size, "fmt": fmt}, background=background)
         if "error" in r:
             return r
@@ -264,12 +378,15 @@ class Document:
             return {"error": {"message": f"no scene {scene!r} traced in this revision", "code": "scene"}}
         if not oid:
             return {"glyphs": None}
+        never = self._never_ends(scene)
+        if never:
+            return never
         f = max(0, min(int(f), self.frame_count(scene) - 1))
         key = (self.rev, scene, f, "glyphs", oid)
         hit = self.frames.get(key)
         if hit is not None:
             return hit
-        r = await self.worker.request({"op": "frame", "scene": scene, "f": f, "ids": oid,
+        r = await self._engine({"op": "frame", "scene": scene, "f": f, "ids": oid,
                                        "size": "half", "fmt": "jpeg"})
         if "error" in r:
             return r
@@ -278,10 +395,38 @@ class Document:
         self.frames.put(key, out)
         return out
 
+    async def stop(self) -> dict:
+        """Stop a load or trace that runs too long (an endless loop): end the
+        engine process. The reload that follows skips what was stopped, for
+        these bytes; saving the file tries again."""
+        if self.tracing is None:
+            return {"type": "error", "message": "nothing is running"}
+        name = self.tracing[0]
+        self._stopped.setdefault(self.data, set()).add(name)
+        self._stop_asked = True
+        await asyncio.to_thread(self.worker.kill)
+        return {"type": "stopped", "scene": name or None}
+
+    async def send_status(self):
+        """Pushed while something runs, so the UI can offer Stop."""
+        t = self.tracing
+        await self.notify({"type": "engine.busy", "file": self.name,
+                           "what": None if t is None else (t[0] or "(loading the file)"),
+                           "since": None if t is None else round(time.monotonic() - t[1], 1)})
+
     def _restarted(self):
         """The worker was replaced (crash or deadline): it has nothing loaded.
         Reload, but not forever: code that hangs on every load stays an error
         until the file changes."""
+        self.tracing = None
+        if getattr(self, "_stop_asked", False):
+            # stopped by the user: reload, skipping what was stopped; it doesn't count.
+            # The load that was running is superseded now, so its "restarted" reply
+            # for the stopped scene is never shown, not even until the reload starts
+            self._stop_asked = False
+            self._load_gen = getattr(self, "_load_gen", 0) + 1
+            asyncio.get_running_loop().create_task(self.load())
+            return
         self._restarts_here = getattr(self, "_restarts_here", {})
         n = self._restarts_here[self.data] = self._restarts_here.get(self.data, 0) + 1
         if n > 2:
@@ -292,7 +437,20 @@ class Document:
         asyncio.get_running_loop().create_task(self.load())
 
     def _annotate(self, o: dict):
-        """Name, tier and source text for an object, from the code."""
+        """Name, tier and source text for an object, from the code. While the
+        file doesn't run, the frames are the last version that ran, so their
+        objects are named from that version's source (edits are refused then)."""
+        good = getattr(self, "good", None)
+        if self.stale and good is not None:
+            src = self.src
+            self.src = good["src"]  # no await in here: nothing else sees the swap
+            try:
+                return self._annotate_from_src(o)
+            finally:
+                self.src = src
+        return self._annotate_from_src(o)
+
+    def _annotate_from_src(self, o: dict):
         site = o.get("site") or o.get("user_site")
         o["name"] = self._label(o.get("chain_spans") or []) or             (self.name_at(o.get("site")) if o.get("site") else None)
         o["tier"] = self.tier_at(site[0]) if site else 3
@@ -414,21 +572,37 @@ class Document:
         return out
 
     # -- the model sent to the UI ---------------------------------------------
-    def model(self) -> dict:
+    def _scenes(self) -> list[dict]:
         scenes = []
-        census = summary(classify(self.src.tree, self.api)) if self.src.ok else None
         for name in self.meta.get("scenes", []) if self.src.ok else []:
             tr = self.traces.get(name)
             if tr is None:
                 scenes.append({"name": name, "pending": True})
                 continue
             scenes.append(self._scene_model(tr))
+        return scenes
+
+    def model(self) -> dict:
+        stale = self.stale
+        if stale:
+            # the scenes of the last version that ran, read against its own source
+            # (no await in here, so nothing sees the swap)
+            now = (self.src, self._census, getattr(self, "_lit_cache", None), self.data)
+            self.src, self.data = self.good["src"], self.good["data"]
+            try:
+                scenes = self._scenes()
+            finally:
+                self.src, self._census, self._lit_cache, self.data = now
+        else:
+            scenes = self._scenes()
+        census = summary(classify(self.src.tree, self.api)) if self.src.ok else None
         return {"type": "model", "file": self.name, "rev": self.rev, "session": SESSION, "scenes": scenes,
+                "stale": stale,
                 "fps": self.meta.get("fps", 15), "width": self.meta.get("width", 854),
                 "height": self.meta.get("height", 480), "frame_width": self.meta.get("frame_width", 14.2222),
                 "frame_height": self.meta.get("frame_height", 8.0), "error": self.error, "census": census,
                 "active": self.active, "undo": bool(self.undo), "redo": bool(self.redo),
-                "source": self.data.decode("utf-8", "replace"), "literals": self.literal_list()}
+                "source": self.data.decode("utf-8", "replace"), "literals": [] if stale else self.literal_list()}
 
     def _scene_model(self, tr: dict) -> dict:
         clips, rows = [], OrderedDict()
@@ -582,112 +756,124 @@ class Document:
     # -- edits ------------------------------------------------------------------
     async def edit(self, msg: dict) -> dict:
         async with self.edit_lock:
-            if msg.get("rev") != self.rev:
-                return {"type": "error", "code": "stale", "message": "the file changed; try again"}
-            if not self.src.ok:
-                return {"type": "edit.refused", "reason": "the file doesn't parse; fix it first"}
-            scene = msg.get("scene")
-            tr = self.traces.get(scene)
-            if tr is None and msg["type"] == "edit.scene_order":
-                # the SCENES list belongs to no scene: verify against any traced one
-                scene = next((n for n, t in self.traces.items() if not t.get("error")), None)
-                tr = self.traces.get(scene) if scene else None
-            if tr is None:
-                return {"type": "edit.refused", "reason": "that scene is still being traced; try again in a moment"}
-            if tr.get("error"):
-                return {"type": "edit.refused", "reason": "the scene stops with an error; fix it first"}
+            at = msg.get("at")
+            self._edit_at = (msg.get("scene"), at) if isinstance(at, int) and not isinstance(at, bool) and at >= 0 else None
+            self._verified_frame = None
             try:
-                if msg["type"] == "edit.timing":
-                    clips = self._scene_model(tr)["clips"]
-                    i = msg.get("clip")
-                    if not isinstance(i, int) or not 0 <= i < len(clips):
-                        return {"type": "edit.refused", "reason": "that clip no longer exists"}
-                    clip = clips[i]
-                    if msg.get("anim") is not None and not (
-                            isinstance(msg["anim"], int) and 0 <= msg["anim"] < len(clip["anims"])):
-                        return {"type": "edit.refused", "reason": "that animation no longer exists"}
-                    c = dict(clip)
-                    if msg.get("anim") is not None:
-                        c.update(kind="anim", anim_index=msg["anim"],
-                                 default_rate_func=clip["anims"][msg["anim"]]["default_rate_func"])
-                    elif clip["anims"]:
-                        c["default_rate_func"] = clip["anims"][0]["default_rate_func"]
-                    plan = planner.plan_timing(self.src, c, msg["field"], msg["value"])
-                    target = {"kind": "timing", "clip": msg["clip"], "anim": msg.get("anim"),
-                              "field": msg["field"], "value": msg["value"]}
-                elif msg["type"] in ("edit.move", "edit.scale", "edit.rotate"):
-                    return await self._transform(scene, tr, msg)
-                elif msg["type"] in STRUCTURAL:
-                    return await self._structural(scene, tr, msg)
-                elif msg["type"] in TIMELINE:
-                    return await self._timeline(scene, tr, msg)
-                elif msg["type"] == "edit.camera":
-                    return await self._camera(scene, tr, msg)
-                elif msg["type"] == "edit.part_colour":
-                    return await self._part_colour(scene, tr, msg)
-                elif msg["type"] == "edit.match_parts":
-                    clips = self._scene_model(tr)["clips"]
-                    i, arg = msg.get("clip"), msg.get("arg")
-                    if not isinstance(i, int) or not 0 <= i < len(clips) or clips[i].get("lock"):
-                        return {"type": "edit.refused", "reason": "that clip can't be edited here"}
-                    if not isinstance(arg, int):
-                        return {"type": "edit.refused", "reason": "which animation of the play()?"}
-                    plan = transformplan.plan_key_map(self.src, clips[i]["call"], arg,
-                                                      msg.get("source_key"), msg.get("target_key"))
-                    target = {"kind": "literal"}  # the scene must still run; Manim pairs the keys
-                elif msg["type"] == "edit.transform_kind":
-                    clips = self._scene_model(tr)["clips"]
-                    i = msg.get("clip")
-                    if not isinstance(i, int) or not 0 <= i < len(clips) or clips[i].get("lock"):
-                        return {"type": "edit.refused", "reason": "that clip can't be edited here"}
-                    arg = msg.get("arg")
-                    if not isinstance(arg, int):
-                        return {"type": "edit.refused", "reason": "which animation of the play()?"}
-                    plan = transformplan.plan_kind(self.src, clips[i]["call"], arg, str(msg.get("kind")))
-                    target = {"kind": "literal"}  # the scene must still run
-                elif msg["type"] == "edit.curve":
-                    plan = graphplan.plan_curve(self.src, msg.get("object") or {}, str(msg.get("expr", "")), self.api)
-                    target = {"kind": "literal"}  # the replay must run; the curve is what was typed
-                elif msg["type"] == "edit.literal":
-                    if "changes" in msg:
-                        plan = literalplan.plan_literals(self.src, self.census(), msg.get("changes"))
-                    else:
-                        plan = literalplan.plan_literal(self.src, self.census(), msg.get("span"), msg.get("value") or {})
-                    target = {"kind": "literal"}
-                elif msg["type"] == "edit.prop":
-                    obj = msg["object"]
-                    plan = planner.plan_property(self.src, obj, msg["prop"], msg["value"])
-                    target = {"kind": "prop", "object": obj["id"], "f": msg["f"], "prop": msg["prop"],
-                              "value": msg["value"], "before": (obj.get("values") or {}).get(msg["prop"])}
+                return await self._edit(msg)
+            finally:
+                self._edit_at = None
+
+    async def _edit(self, msg: dict) -> dict:
+        if msg.get("rev") != self.rev:
+            return {"type": "error", "code": "stale", "message": "the file changed; try again"}
+        if not self.src.ok:
+            return {"type": "edit.refused", "reason": "the file doesn't parse; fix it first"}
+        if self.error:
+            return {"type": "edit.refused", "reason": "the file doesn't run; fix it first (the studio is showing "
+                                                      "the last version that ran)"}
+        scene = msg.get("scene")
+        tr = self.traces.get(scene)
+        if tr is None and msg["type"] == "edit.scene_order":
+            # the SCENES list belongs to no scene: verify against any traced one
+            scene = next((n for n, t in self.traces.items() if not t.get("error")), None)
+            tr = self.traces.get(scene) if scene else None
+        if tr is None:
+            return {"type": "edit.refused", "reason": "that scene is still being traced; try again in a moment"}
+        if tr.get("error"):
+            return {"type": "edit.refused", "reason": "the scene stops with an error; fix it first"}
+        try:
+            if msg["type"] == "edit.timing":
+                clips = self._scene_model(tr)["clips"]
+                i = msg.get("clip")
+                if not isinstance(i, int) or not 0 <= i < len(clips):
+                    return {"type": "edit.refused", "reason": "that clip no longer exists"}
+                clip = clips[i]
+                if msg.get("anim") is not None and not (
+                        isinstance(msg["anim"], int) and 0 <= msg["anim"] < len(clip["anims"])):
+                    return {"type": "edit.refused", "reason": "that animation no longer exists"}
+                c = dict(clip)
+                if msg.get("anim") is not None:
+                    c.update(kind="anim", anim_index=msg["anim"],
+                             default_rate_func=clip["anims"][msg["anim"]]["default_rate_func"])
+                elif clip["anims"]:
+                    c["default_rate_func"] = clip["anims"][0]["default_rate_func"]
+                plan = planner.plan_timing(self.src, c, msg["field"], msg["value"])
+                target = {"kind": "timing", "clip": msg["clip"], "anim": msg.get("anim"),
+                          "field": msg["field"], "value": msg["value"]}
+            elif msg["type"] in ("edit.move", "edit.scale", "edit.rotate"):
+                return await self._transform(scene, tr, msg)
+            elif msg["type"] in STRUCTURAL:
+                return await self._structural(scene, tr, msg)
+            elif msg["type"] in TIMELINE:
+                return await self._timeline(scene, tr, msg)
+            elif msg["type"] == "edit.camera":
+                return await self._camera(scene, tr, msg)
+            elif msg["type"] == "edit.part_colour":
+                return await self._part_colour(scene, tr, msg)
+            elif msg["type"] == "edit.match_parts":
+                clips = self._scene_model(tr)["clips"]
+                i, arg = msg.get("clip"), msg.get("arg")
+                if not isinstance(i, int) or not 0 <= i < len(clips) or clips[i].get("lock"):
+                    return {"type": "edit.refused", "reason": "that clip can't be edited here"}
+                if not isinstance(arg, int):
+                    return {"type": "edit.refused", "reason": "which animation of the play()?"}
+                plan = transformplan.plan_key_map(self.src, clips[i]["call"], arg,
+                                                  msg.get("source_key"), msg.get("target_key"))
+                target = {"kind": "literal"}  # the scene must still run; Manim pairs the keys
+            elif msg["type"] == "edit.transform_kind":
+                clips = self._scene_model(tr)["clips"]
+                i = msg.get("clip")
+                if not isinstance(i, int) or not 0 <= i < len(clips) or clips[i].get("lock"):
+                    return {"type": "edit.refused", "reason": "that clip can't be edited here"}
+                arg = msg.get("arg")
+                if not isinstance(arg, int):
+                    return {"type": "edit.refused", "reason": "which animation of the play()?"}
+                plan = transformplan.plan_kind(self.src, clips[i]["call"], arg, str(msg.get("kind")))
+                target = {"kind": "literal"}  # the scene must still run
+            elif msg["type"] == "edit.curve":
+                plan = graphplan.plan_curve(self.src, msg.get("object") or {}, str(msg.get("expr", "")), self.api)
+                target = {"kind": "literal"}  # the replay must run; the curve is what was typed
+            elif msg["type"] == "edit.literal":
+                if "changes" in msg:
+                    plan = literalplan.plan_literals(self.src, self.census(), msg.get("changes"))
                 else:
-                    return {"type": "error", "message": f"unknown edit {msg['type']}"}
-            except EditError as e:
-                return {"type": "edit.refused", "reason": str(e)}
-            try:
-                new = apply(self.data, plan.edits)
-            except EditError as e:  # overlapping edits from a planner: refuse, don't crash the request
-                return {"type": "edit.refused", "reason": str(e)}
-            if plan.confirm:
-                token = hashlib.sha1(new).hexdigest()[:12]
-                self.pending[token] = Pending(token, scene, new, plan.note, plan.edits, plan.checks, target,
-                                              base=self.data)
-                reply = {"type": "edit.preview", "token": token, "summary": plan.note,
-                         "why": plan.confirm, "diff": self.diff(new)}
-                if msg["type"] == "edit.prop":
-                    try:
-                        alt = planner.plan_property_override(self.src, msg["object"], msg["prop"], msg["value"])
-                    except EditError:
-                        alt = None
-                    if alt is not None:
-                        new2 = apply(self.data, alt.edits)
-                        if Source(new2).ok:
-                            t2 = hashlib.sha1(new2).hexdigest()[:12]
-                            self.pending[t2] = Pending(t2, scene, new2, alt.note, alt.edits, alt.checks, target,
-                                                       base=self.data)
-                            reply["alternatives"] = [{"token": t2, "summary": alt.note, "diff": self.diff(new2),
-                                                      "label": "Only this one"}]
-                return reply
-            return await self._verify_and_write(scene, new, plan.note, target)
+                    plan = literalplan.plan_literal(self.src, self.census(), msg.get("span"), msg.get("value") or {})
+                target = {"kind": "literal"}
+            elif msg["type"] == "edit.prop":
+                obj = msg["object"]
+                plan = planner.plan_property(self.src, obj, msg["prop"], msg["value"])
+                target = {"kind": "prop", "object": obj["id"], "f": msg["f"], "prop": msg["prop"],
+                          "value": msg["value"], "before": (obj.get("values") or {}).get(msg["prop"])}
+            else:
+                return {"type": "error", "message": f"unknown edit {msg['type']}"}
+        except EditError as e:
+            return {"type": "edit.refused", "reason": str(e)}
+        try:
+            new = apply(self.data, plan.edits)
+        except EditError as e:  # overlapping edits from a planner: refuse, don't crash the request
+            return {"type": "edit.refused", "reason": str(e)}
+        if plan.confirm:
+            token = hashlib.sha1(new).hexdigest()[:12]
+            self.pending[token] = Pending(token, scene, new, plan.note, plan.edits, plan.checks, target,
+                                          base=self.data)
+            reply = {"type": "edit.preview", "token": token, "summary": plan.note,
+                     "why": plan.confirm, "diff": self.diff(new)}
+            if msg["type"] == "edit.prop":
+                try:
+                    alt = planner.plan_property_override(self.src, msg["object"], msg["prop"], msg["value"])
+                except EditError:
+                    alt = None
+                if alt is not None:
+                    new2 = apply(self.data, alt.edits)
+                    if Source(new2).ok:
+                        t2 = hashlib.sha1(new2).hexdigest()[:12]
+                        self.pending[t2] = Pending(t2, scene, new2, alt.note, alt.edits, alt.checks, target,
+                                                   base=self.data)
+                        reply["alternatives"] = [{"token": t2, "summary": alt.note, "diff": self.diff(new2),
+                                                  "label": "Only this one"}]
+            return reply
+        return await self._verify_and_write(scene, new, plan.note, target)
 
     async def _part_colour(self, scene: str, tr: dict, msg: dict) -> dict:
         """Colour some glyphs of a Text / MathTex / Tex (step 6). Each
@@ -724,7 +910,7 @@ class Document:
                    "object": remap_id(obj.get("id"), self.data, plan.edits)}
             if "name" in value:
                 req["eval_name"] = value["name"]
-            r = await self.worker.request(req)
+            r = await self._engine(req)
             if "error" in r:
                 reasons.append(f"{plan.note}: the scene doesn't run ({_stop_reason(r['error'])})")
                 continue
@@ -793,7 +979,7 @@ class Document:
             fv = int(round((plan.checks["start"] + plan.checks["run_time"]) * fps))
         elif "verify_at" in plan.checks:  # a camera move running at f: look at its end
             fv = max(0, int(round(plan.checks["verify_at"] * fps)) - 1)
-        r = await self.worker.request({"op": "verify", "data": new, "scene": scene, "f": fv, "objects": True})
+        r = await self._engine({"op": "verify", "data": new, "scene": scene, "f": fv, "objects": True})
         if "error" in r:
             return {"type": "edit.refused", "reason": f"the edited scene doesn't run: {r['error']['message']}"}
         if r["trace"].get("error"):
@@ -836,7 +1022,7 @@ class Document:
             req.update(object=target["object"], f=target["f"])
             if "name" in target["value"]:
                 req["eval_name"] = target["value"]["name"]
-        r = await self.worker.request(req)
+        r = await self._engine(req)
         if "error" in r:
             return {"type": "edit.refused", "reason": f"the edited scene doesn't run: {r['error']['message']}"}
         why = self._check(target, r)
@@ -853,6 +1039,7 @@ class Document:
         self.undo.append(UndoStep(before, new, note))
         self.redo.clear()
         await self._reload_for_reply()
+        self._seed_frame(new)
         return {"type": "edit.done", "summary": note, "diff": diff, "rev": self.rev}
 
     # -- canvas edits: move, scale, rotate (code_spec §4.1, §4.2) ------------------------
@@ -929,7 +1116,7 @@ class Document:
                 i += 1
                 continue
             oid = remap_id(obj.get("id"), self.data, c.edits)
-            r = await self.worker.request({"op": "verify", "data": new, "scene": scene, "object": oid, "f": f})
+            r = await self._engine({"op": "verify", "data": new, "scene": scene, "object": oid, "f": f})
             if "error" in r:
                 tried.append(f"{c.note}: the scene doesn't run ({r['error']['message'][:80]})")
                 i += 1
@@ -1029,7 +1216,7 @@ class Document:
         if kind == "edit.preset":
             fv = max(0, int(round(ch["start"] * fps)) + 1)
         req = {"op": "verify", "data": new, "scene": scene, "f": fv, "objects": True}
-        r = await self.worker.request(req)
+        r = await self._engine(req)
         if "error" in r:
             return {"type": "edit.refused", "reason": f"the edited scene doesn't run: {r['error']['message']}"}
         if r["trace"].get("error"):
@@ -1158,7 +1345,7 @@ class Document:
         new = apply(self.data, plan.edits)
         if not Source(new).ok:
             return {"type": "edit.refused", "reason": "the edit would not parse"}
-        r = await self.worker.request({"op": "verify", "data": new, "scene": scene})
+        r = await self._engine({"op": "verify", "data": new, "scene": scene})
         if "error" in r:
             return {"type": "edit.refused", "reason": f"the edited scene doesn't run: {r['error']['message']}"}
         after = r["trace"]
@@ -1184,7 +1371,7 @@ class Document:
                     tidy = apply(new, cleanup)
                     if Source(tidy).ok:
                         # the tidied file is replayed too: it must time out exactly as the edit did
-                        r2 = await self.worker.request({"op": "verify", "data": tidy, "scene": scene})
+                        r2 = await self._engine({"op": "verify", "data": tidy, "scene": scene})
                         after2 = r2.get("trace") if "error" not in r2 else None
                         same = after2 is not None and not after2.get("error") \
                             and _timings(after2) == _timings(after) \
@@ -1208,6 +1395,19 @@ class Document:
                 return (f"it is animating here (the play() at line {ev.get('call_line')}); "
                         "move the playhead to a still moment or the end of the animation")
         return None
+
+    def _seed_frame(self, new: bytes):
+        """The frame the edit's verify run drew at the playhead, cached for the
+        revision now loaded, when that revision is exactly those bytes."""
+        v, self._verified_frame = getattr(self, "_verified_frame", None), None
+        if v is None or v[0] != new or self.data != new or self.error:
+            return
+        _, scene, f, fr = v
+        if scene not in self.traces or not 0 <= f < self.frame_count(scene):
+            return
+        for o in fr.get("objects", []):
+            self._annotate(o)
+        self.frames.put((self.rev, scene, f, "full", "png"), fr)
 
     async def _reload_for_reply(self):
         """Reload after our own write; return as soon as the active scene is
@@ -1279,11 +1479,17 @@ class Document:
             return f"can't read the file: {e}"
         if on_disk != self.data:
             return "the file changed on disk while the edit was checked; nothing was written"
+        import os
+        if not os.access(self.path, os.W_OK):
+            # (an atomic replace would go round the read-only flag on POSIX systems)
+            return "the file is read-only; make it writable (file properties, or git), then try again"
         try:
             write_atomic(self.path, new)
         except OSError as e:
             self.path.with_name(self.path.name + ".studio-tmp").unlink(missing_ok=True)
-            return f"can't write the file ({type(e).__name__}: {e}); is it locked by another program?"
+            if getattr(e, "errno", None) == 28:
+                return "the disk is full; nothing was written"
+            return f"can't write the file ({type(e).__name__}: {e}); is it open and locked in another program?"
         self.last_write = new
         self.data = new
         return None
@@ -1324,12 +1530,44 @@ class Document:
         async with self.edit_lock:
             try:
                 data = self.path.read_bytes()
-            except OSError:
+            except OSError as e:
+                if not self.path.exists() and (self.error or {}).get("code") != "missing":
+                    # deleted or renamed: keep showing what we have, read-only, until it's back
+                    self.error = {"code": "missing", "line": None,
+                                  "message": "the file was deleted or renamed outside the studio; "
+                                             "nothing can be written until it's back"}
+                    self.rev += 1
+                    self.pending.clear()
+                    await self.notify({"type": "file.changed", "file": self.name, "by": "deleted"})
+                    await self.send_model()
+                elif self.path.exists():
+                    self.error = {"code": "unreadable", "line": None, "message": f"can't read the file: {e}"}
+                    await self.send_model()
                 return
-            if data == self.data:
+            if data == self.data and (self.error or {}).get("code") not in ("missing", "unreadable"):
                 return  # our own write, or a touch
             self.data = data
             await self.notify({"type": "file.changed", "file": self.name, "by": "external"})
+            await self.load()
+
+    def depends_on(self, path: Path) -> bool:
+        try:
+            p = str(Path(path).resolve())
+        except (OSError, ValueError):
+            return False
+        return p in {str(Path(d).resolve()) for d in getattr(self, "deps", [])}
+
+    async def deps_changed(self):
+        """A local module the scene imports (style.py, manim_kit.py) changed:
+        a new engine process imports it afresh, then everything is traced
+        again (the cache key covers the module's bytes)."""
+        async with self.edit_lock:
+            # Windows reports a "modified" event when a module is only read (another
+            # engine importing manim_kit.py): restart only if the bytes really changed
+            if tracecache.deps_digest(self.path, getattr(self, "deps", [])) == getattr(self, "_deps_digest", None):
+                return
+            await self.notify({"type": "file.changed", "file": self.name, "by": "dependency"})
+            await self.worker.fresh()
             await self.load()
 
     def close(self):

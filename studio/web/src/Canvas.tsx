@@ -96,7 +96,9 @@ export function Canvas(p: Props) {
       clearTimeout(slowTimer);
       setSlow(false);
       // 410 = an edit or reload made a new revision; the new frame follows
-      fetch(url).then((r) => r.status === 410 ? null : r.text().then((t) => t || `HTTP ${r.status}`))
+      // the server answers {"message", "code"}: show the message, not the JSON
+      const said = (t: string) => { try { return JSON.parse(t).message || t; } catch { return t; } };
+      fetch(url).then((r) => r.status === 410 ? null : r.text().then((t) => said(t) || `HTTP ${r.status}`))
         .then((why) => { if (!gone && why) setFailed(why.slice(0, 160)); })
         .catch(() => { if (!gone) setFailed("the studio server isn't answering"); });
     };

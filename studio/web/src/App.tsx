@@ -6,6 +6,9 @@ import { Library } from "./Library";
 import { Timeline } from "./Timeline";
 import { Inspector } from "./Inspector";
 import { CodePeek } from "./CodePeek";
+import { ExportDialog, RUNNING, jobLine, type ExportJob } from "./ExportDialog";
+import { ClaudePanel } from "./ClaudePanel";
+import { BINDINGS, actionFor, nudgeStep, tip } from "./keymap";
 
 const conn = new Conn();
 
@@ -21,7 +24,13 @@ export type Selection =
 export function App() {
   const [up, setUp] = useState(false);
   const [files, setFiles] = useState<{ path: string; scenes: string[] }[]>([]);
-  const [file, setFile] = useState<string>(() => localStorageGet("studio.file") ?? "");
+  // ?file=order_matters.py opens that file (a link or the app shortcut); else the last one
+  const [file, setFile] = useState<string>(() => {
+    const asked = new URLSearchParams(window.location.search).get("file");
+    // read once: a reload after picking another file must not go back to this one
+    if (asked !== null) window.history.replaceState(null, "", window.location.pathname);
+    return asked ?? localStorageGet("studio.file") ?? "";
+  });
   const [model, setModel] = useState<Model | null>(null);
   const [sceneName, setSceneName] = useState<string | null>(null);
   const [f, setF] = useState(0);
@@ -38,6 +47,12 @@ export function App() {
   const [lastDiff, setLastDiff] = useState<DiffHunk[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ cursors?: number; of?: number; cached?: number; frames?: number }>({});
+  const [exportOpen, setExportOpen] = useState(false);
+  const [claude, setClaude] = useState<"never" | "open" | "closed">("never");
+  const [jobs, setJobs] = useState<ExportJob[]>([]);
+  // what the engine is running now (a long load or trace can be stopped)
+  const [busyEngine, setBusyEngine] = useState<{ what: string; from: number } | null>(null);
+  const [, setTick] = useState(0);
 
   const toast = useCallback((kind: Toast["kind"], text: string) => {
     const id = Math.random();
@@ -58,6 +73,7 @@ export function App() {
     conn.onOpen = () => {
       if (!first) fetch("/api/files").then((r) => r.json()).then(setFiles).catch(() => {});
       first = false;
+      conn.request({ type: "export.list" }).then((r) => { if (r.type === "export.jobs") setJobs(r.jobs); });
       if (fileRef.current) {
         conn.send({ type: "open", file: fileRef.current });
         if (sceneRef.current) conn.send({ type: "scene", file: fileRef.current, scene: sceneRef.current });
@@ -77,7 +93,16 @@ export function App() {
       if (m.type === "model") {
         if (m.file === fileRef.current) setModel(m);  // other files' models are for other tabs
       } else if (m.type === "file.changed") {
-        toast("info", `${m.file} changed outside the studio; reloaded`);
+        toast(m.by === "deleted" ? "bad" : "info", m.by === "dependency" ? `a module ${m.file} imports changed; restarting its engine`
+          : m.by === "deleted" ? `${m.file} was deleted or renamed outside the studio`
+          : `${m.file} changed outside the studio; reloaded`);
+      } else if (m.type === "engine.busy") {
+        if (m.file === fileRef.current) setBusyEngine(m.what ? { what: m.what, from: Date.now() - (m.since ?? 0) * 1000 } : null);
+      } else if (m.type === "export.progress") {
+        const j: ExportJob = m.job;
+        setJobs((js) => js.some((x) => x.id === j.id) ? js.map((x) => x.id === j.id ? j : x) : [...js, j]);
+        if (j.state === "done") toast(j.check && !j.check.ok ? "bad" : "ok", `export of ${j.file}: ${jobLine(j)}`);
+        else if (j.state === "failed") toast("bad", `export of ${j.file} failed: ${j.message}`);
       } else if (m.type === "error") {
         toast("bad", m.message);
       }
@@ -314,11 +339,12 @@ export function App() {
   const sendEdit = useCallback((msg: object): Promise<any> | null => {
     if (!model || !scene || busy || preview) return null;
     setBusy(true);
-    return conn.request({ ...msg, file: model.file, scene: scene.name, rev: model.rev }).then((r) => {
+    // at: the playhead, so the edit's own replay can also hand back the frame shown next
+    return conn.request({ at: f, ...msg, file: model.file, scene: scene.name, rev: model.rev }).then((r) => {
       handleReply(r);
       return r;
     });
-  }, [model, scene, handleReply, busy, preview]);
+  }, [model, scene, handleReply, busy, preview, f]);
 
   const select = useCallback((o: Obj | null, how: "set" | "toggle" = "set") => {
     if (!o) { setSel(null); setOthers([]); return; }
@@ -435,52 +461,89 @@ export function App() {
     conn.request({ type: which, file: model.file }).then(handleReply);
   }, [model, busy, preview, handleReply]);
 
-  // -- keyboard ------------------------------------------------------------------------
+  // -- keyboard (the table is in keymap.ts) ------------------------------------------
+  // Arrow nudges add up while the key is held and go out as one edit (one undo step)
+  // once the keys rest for a moment.
+  const nudgeRef = useRef<{ dx: number; dy: number; obj: Obj; f: number; timer: number } | null>(null);
+  const [nudge, setNudge] = useState<{ dx: number; dy: number } | null>(null);
+  const flushNudge = useCallback(() => {
+    const n = nudgeRef.current;
+    nudgeRef.current = null;
+    setNudge(null);
+    if (!n) return;
+    window.clearTimeout(n.timer);
+    const r = (v: number) => Math.round(v * 10000) / 10000;
+    if (r(n.dx) || r(n.dy)) sendEdit({ type: "edit.move", object: n.obj, f: n.f, dx: r(n.dx), dy: r(n.dy) });
+  }, [sendEdit]);
+  const doNudge = useCallback((ux: number, uy: number, e: KeyboardEvent) => {
+    if (sel?.kind !== "object") return;
+    if (!objReady) { if (canEdit) offScreenNote(); return; }
+    if (objLocked || sel.obj.virtual) { toast("info", "This one can't be moved from the studio"); return; }
+    if (sel.obj.proj) { toast("info", "In a 3D scene, drag the object on the canvas"); return; }
+    let n = nudgeRef.current;
+    if (n && n.obj.id !== sel.obj.id) { flushNudge(); n = null; }
+    n = n ?? { dx: 0, dy: 0, obj: sel.obj, f, timer: 0 };
+    const step = nudgeStep(e);
+    n.dx += ux * step;
+    n.dy += uy * step;
+    window.clearTimeout(n.timer);
+    n.timer = window.setTimeout(flushNudge, 450);
+    nudgeRef.current = n;
+    setNudge({ dx: n.dx, dy: n.dy });
+  }, [sel, objReady, canEdit, objLocked, f, flushNudge, toast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [helpOpen, setHelpOpen] = useState(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       // a focused clickable literal in the code peek takes its own Space/Enter
       if ((e.key === " " || e.key === "Enter") && (e.target as HTMLElement)?.getAttribute?.("role") === "button") return;
-      // picking glyphs, editing text in place or moving the camera: their own keys only
+      // picking glyphs, editing text in place, moving the camera, a dialog: their own keys only
       // (each closes itself on Escape); Delete must not delete the object under them
-      if (partPick || textEdit || camCanvas) return;
+      if (partPick || textEdit || camCanvas || exportOpen) return;
+      if (helpOpen) {
+        if (e.key === "Escape" || e.key === "?") { e.preventDefault(); setHelpOpen(false); }
+        return;
+      }
       if (preview) {  // the confirm dialog is open: Escape cancels it, nothing else
         if (e.key === "Escape") cancelPreview();
         return;
       }
       // Backspace deletes only when nothing has focus (not after clicking a button)
       if (e.key === "Backspace" && e.target !== document.body) return;
-      if (e.key === " ") {
-        e.preventDefault();
-        if (ready) togglePlay();
-      } else if (e.key === "ArrowLeft") {
-        seek(f - (e.shiftKey ? fps : 1), true);
-      } else if (e.key === "ArrowRight") {
-        seek(f + (e.shiftKey ? fps : 1), true);
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
-        e.preventDefault();
-        undoRedo(e.shiftKey ? "redo" : "undo");
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
-        e.preventDefault();
-        undoRedo("redo");
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
-        e.preventDefault();
-        doDuplicate();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
-        e.preventDefault();
-        doGroup();
-      } else if (e.key === "Delete" || e.key === "Backspace") {
-        e.preventDefault();
-        doDelete();
-      } else if (e.key === "Escape") {
-        setSel(null);
-        setOthers([]);
+      const action = actionFor(e, sel?.kind === "object");
+      if (!action || action === "ripple" || action === "marker") return;  // those two: the timeline's
+      e.preventDefault();
+      const clipStarts = () => [...new Set((scene?.clips ?? []).map((c) => Math.round(c.start * fps)))].sort((x, y) => x - y);
+      switch (action) {
+        case "play": if (ready) togglePlay(); break;
+        case "back": seek(f - 1, true); break;
+        case "forward": seek(f + 1, true); break;
+        case "back1s": seek(f - fps, true); break;
+        case "forward1s": seek(f + fps, true); break;
+        case "start": seek(0, true); break;
+        case "end": seek(Number.MAX_SAFE_INTEGER, true); break;
+        case "prevClip": { const p = clipStarts().filter((x) => x < f).pop(); if (p !== undefined) seek(p, true); break; }
+        case "nextClip": { const n = clipStarts().find((x) => x > f); if (n !== undefined) seek(n, true); break; }
+        case "nudgeLeft": doNudge(-1, 0, e); break;
+        case "nudgeRight": doNudge(1, 0, e); break;
+        case "nudgeUp": doNudge(0, 1, e); break;
+        case "nudgeDown": doNudge(0, -1, e); break;
+        case "undo": undoRedo("undo"); break;
+        case "redo": undoRedo("redo"); break;
+        case "duplicate": doDuplicate(); break;
+        case "group": doGroup(); break;
+        case "delete": doDelete(); break;
+        case "clear": setSel(null); setOthers([]); break;
+        case "export": if (model?.scenes.length) setExportOpen(true); break;
+        case "help": setHelpOpen(true); break;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup, partPick, textEdit, camCanvas]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [f, fps, seek, undoRedo, togglePlay, preview, ready, doDelete, doDuplicate, doGroup, doNudge, partPick, textEdit, // eslint-disable-line react-hooks/exhaustive-deps
+    camCanvas, exportOpen, helpOpen, sel, scene, model]);
 
   // the dialog takes the focus (not a button: a second Enter from the field
   // must not answer it unread); Tab reaches the buttons, Escape cancels
@@ -493,7 +556,7 @@ export function App() {
     <div className="app">
       <header className="bar">
         <strong className="brand">Manim Studio</strong>
-        <select value={file} onChange={(e) => setFile(e.target.value)} title="Scene file">
+        <select className="file-pick" value={file} onChange={(e) => setFile(e.target.value)} title="Scene file">
           <option value="" disabled>Open a scene file…</option>
           {file && !files.some((x) => x.path === file) && <option value={file}>{file}</option>}
           {files.map((x) => <option key={x.path} value={x.path}>{x.path}</option>)}
@@ -531,12 +594,39 @@ export function App() {
               : "● tracing…"}
           </span>
         )}
+        {busyEngine && <BusyEngine busy={busyEngine} onStop={() => conn.request({ type: "stop", file: model?.file })
+          .then((r) => { if (r.type === "stopped") toast("info", `stopped ${r.scene ?? "loading the file"}; it's skipped until you save the file`); })}
+          tick={() => setTick((n) => n + 1)} />}
         {model?.census && <span className="pill" title="Statements by tier (code_spec §2)">tier 1 {model.census.pct["1"]}% · 2 {model.census.pct["2"]}% · 3 {model.census.pct["3"]}%</span>}
         {model && <span className="pill">rev {model.rev}</span>}
-        <button disabled={!model?.undo || busy} onClick={() => undoRedo("undo")} title="Undo (Ctrl+Z)">↶ Undo</button>
-        <button disabled={!model?.redo || busy} onClick={() => undoRedo("redo")} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
+        {nudge && <span className="pill warm" title="Arrow keys add up; the move is written when you stop">nudge {nudge.dx >= 0 ? "+" : ""}{nudge.dx.toFixed(2)}, {nudge.dy >= 0 ? "+" : ""}{nudge.dy.toFixed(2)}</span>}
+        {(() => {
+          const run = jobs.find((j) => RUNNING.has(j.state));
+          return run && <button className="pill warm" onClick={() => setExportOpen(true)} title="Export running">⏺ {jobLine(run)}</button>;
+        })()}
+        <button disabled={!model?.scenes.length} onClick={() => setExportOpen(true)} title={tip("export")}>Export…</button>
+        <button disabled={!model?.undo || busy} onClick={() => undoRedo("undo")} title={tip("undo")}>↶ Undo</button>
+        <button disabled={!model?.redo || busy} onClick={() => undoRedo("redo")} title={tip("redo")}>↷ Redo</button>
+        <button className={claude === "open" ? "on" : ""} onClick={() => setClaude((c) => c === "open" ? "closed" : "open")}
+          title="Ask Claude Code about this file">✦ Claude</button>
+        <button onClick={() => setHelpOpen(true)} title={tip("help", "Keyboard shortcuts")} aria-label="Keyboard shortcuts">?</button>
         <span className={`dot ${up ? "on" : ""}`} title={up ? "connected" : "disconnected"} />
       </header>
+
+      {helpOpen && <HelpSheet onClose={() => setHelpOpen(false)} />}
+      {claude !== "never" && (
+        <ClaudePanel conn={conn} open={claude === "open"} onClose={() => setClaude("closed")} ctx={{
+          file: model?.file ?? file, scene: scene?.name ?? null, t: f / fps,
+          selection: sel?.kind === "object"
+            ? { label: sel.obj.name ?? sel.obj.class, line: (sel.obj.user_site ?? sel.obj.site)?.[0] ?? null }
+            : sel?.kind === "clip" ? { label: `clip ${sel.clip + 1}${sel.text ? ` (${sel.text.slice(0, 40)})` : ""}`, line: sel.line ?? null }
+            : null,
+        }} />
+      )}
+      {exportOpen && model && (
+        <ExportDialog conn={conn} file={model.file} scenes={model.scenes.map((s) => s.name)} active={scene?.name ?? null}
+          jobs={jobs} onClose={() => setExportOpen(false)} />
+      )}
 
       {!file && <div className="empty">Pick a scene file to open. The studio reads it, runs it, and shows every frame; your edits go straight into the .py file.</div>}
 
@@ -589,18 +679,18 @@ export function App() {
                   clip: sel.clip, arg, source_key: sk, target_key: tk }) : null}
               />
             ) : (
-              <div className="canvas-placeholder">{err ? "The file doesn't run — see the error" : "Tracing the scene…"}</div>
+              <div className="canvas-placeholder">{err ? "The file doesn't run yet, so there's nothing to show. See the error below." : "Tracing the scene…"}</div>
             )}
             <div className="transport">
               <button onClick={() => seek(0, true)} title="Start">⏮</button>
-              <button onClick={togglePlay} disabled={!ready} title="Play / pause (Space)">{playing ? "⏸" : "▶"}</button>
+              <button onClick={togglePlay} disabled={!ready} title={tip("play")}>{playing ? "⏸" : "▶"}</button>
               <span className="mono">{time} / {scene && !scene.pending ? scene.duration.toFixed(2) : "…"} s · frame {f}</span>
               {scene?.target ? <span className="muted">TARGET {scene.target} s</span> : null}
               {hasSound && <button className="ghost" aria-pressed={muted} aria-label={muted ? "Sound off" : "Sound on"} onClick={() => { const m = !muted; setMuted(m); localStorageSet("studio.muted", m ? "1" : "0"); }}
                 title={muted ? "Sound off: narration is not played" : "Sound on: narration plays with the picture"}>{muted ? "🔇" : "🔊"}</button>}
               <span className="muted">{fps} fps</span>
             </div>
-            {err && <div className="errbar">⚠ {err.message}{err.line ? ` (line ${err.line})` : ""} — editing is paused until the file runs again.</div>}
+            {err && <ErrorBar err={err} source={model?.source ?? ""} stale={!!model?.stale} sceneLevel={!model?.error} />}
           </section>
 
           <aside className="panel inspector">
@@ -738,4 +828,79 @@ function localStorageGet(k: string): string | null {
 }
 function localStorageSet(k: string, v: string) {
   try { localStorage.setItem(k, v); } catch { /* private mode */ }
+}
+
+function HelpSheet({ onClose }: { onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  const groups = [...new Set(BINDINGS.map((b) => b.group))];
+  return (
+    <div className="modal-back" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal help" ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+        <h4>Keyboard shortcuts</h4>
+        <div className="help-cols">
+          {groups.map((g) => (
+            <table key={g}>
+              <thead><tr><th colSpan={2}>{g}</th></tr></thead>
+              <tbody>
+                {BINDINGS.filter((b) => b.group === g).map((b) => (
+                  <tr key={b.action}><td>{b.keys.map((k) => <kbd key={k}>{k}</kbd>)}</td><td>{b.label}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          ))}
+        </div>
+        <p className="note muted">Off while a field has focus or an overlay is open (glyph picker, text editor, camera mode, a dialog): those have their own keys, and Esc closes them.</p>
+        <div className="btns"><button className="pri" onClick={onClose}>Close</button></div>
+      </div>
+    </div>
+  );
+}
+
+/** What went wrong, where, and what the canvas is showing meanwhile (Phase 6 step 8). */
+function ErrorBar({ err, source, stale, sceneLevel }: {
+  err: { code?: string; message: string; line: number | null; traceback?: string }; source: string; stale: boolean; sceneLevel: boolean;
+}) {
+  if (err.code === "missing" || err.code === "unreadable") {
+    return (
+      <div className="errbar" role="alert">
+        <div>⚠ <strong>{err.code === "missing" ? "The file is gone" : "The file can't be read"}</strong>: {err.message}</div>
+        <div className="muted">You can still look around. Editing comes back when the file does.</div>
+      </div>
+    );
+  }
+  const lines = source.split(/\r?\n/);
+  const at = err.line && err.line <= lines.length ? err.line : null;
+  return (
+    <div className="errbar" role="alert">
+      <div>⚠ <strong>{sceneLevel ? "This scene stops with an error" : "The file doesn't run"}</strong>
+        {at ? ` at line ${at}` : ""}: {err.message}</div>
+      {at && (
+        <pre className="err-code">{[at - 1, at, at + 1].filter((n) => n >= 1 && n <= lines.length)
+          .map((n) => `${n === at ? "→" : " "} ${String(n).padStart(4)}  ${lines[n - 1]}`).join("\n")}</pre>
+      )}
+      <div className="muted">
+        {stale ? "Showing the last version that ran (read-only). " : ""}
+        {sceneLevel ? "The clips before the error play; editing this scene is paused until it runs to the end."
+          : "Fix the file and save: the studio reloads by itself."}
+      </div>
+      {err.traceback && <details><summary>Traceback</summary><pre>{err.traceback}</pre></details>}
+    </div>
+  );
+}
+
+/** "Tracing Intro… 14 s [Stop]": after a few seconds a long run can be stopped (an endless loop). */
+function BusyEngine({ busy, onStop, tick }: { busy: { what: string; from: number }; onStop: () => void; tick: () => void }) {
+  useEffect(() => {
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [tick]);
+  const s = Math.round((Date.now() - busy.from) / 1000);
+  if (s < 4) return null;
+  return (
+    <span className="pill warm" title="The engine is still running this. An endless loop never finishes: stop it, fix the code, save.">
+      {busy.what === "(loading the file)" ? "loading the file" : `tracing ${busy.what}`}… {s} s{" "}
+      <button className="small" onClick={onStop}>Stop</button>
+    </span>
+  );
 }

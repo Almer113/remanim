@@ -245,6 +245,52 @@ HTTP:
   doesn't draw exactly what the object draws. A formula's first request
   costs a LaTeX compile (~2 s); later ones are cached.
 
+## Added in Phase 6
+
+Models:
+- `stale: true` when the file doesn't run (a parse error or a crash while
+  loading) and the scenes shown are the last version that ran. `source` is
+  the file as it is now; `literals` is `[]`; edits are refused.
+- `error.code` gains `missing` (the file is gone), `unreadable` and
+  `stopped`; `error.traceback` carries the worker's traceback when there is
+  one.
+
+WebSocket, client → server:
+- `{"type": "stop", "file"}` → `{"type": "stopped", "scene"}` (the scene
+  being traced, or `""` for the module load), or an error when nothing is
+  running. A stopped scene is skipped until the file changes.
+- `{"type": "export.start", "file", "spec": {scenes, quality: l|m|h|k,
+  format: mp4|webm|gif|png|mov, transparent, join, check}}` →
+  `export.started {job}`; `export.cancel {id}` → `export.cancelling`;
+  `export.list` → `export.jobs {jobs}`; `export.reveal {id, i}` →
+  `export.revealed` (shows that file in Explorer; refused for pages from
+  another machine). The last three need no open file.
+- `{"type": "claude.status"}` → `claude.status {available, busy, why}`;
+  `{"type": "claude.ask", "prompt", "context": {file, scene, t, selection},
+  "session"?}` → `claude.started {id}`; `claude.stop` → `claude.stopping`.
+  From a page reached through an `--allow-host` name, every `claude.*`
+  message gets `claude.status {available: false}` unless the server runs
+  with `--allow-claude-remote`.
+
+WebSocket, server → client:
+- `engine.busy {file, what, since}` while a load or trace runs long;
+  `what: null` when it ends.
+- `file.changed` gains `by: "dependency"` (a local module the file imports
+  changed; its engine restarted) and `by: "deleted"`.
+- `export.progress {job}` on every state change and about twice a second
+  while a scene renders. A job: `{id, file, spec, state: queued | waiting |
+  rendering | joining | checking | done | failed | cancelled, scenes:
+  [{name, state, out, s, pct}], joined, check: {ok, narrated, report},
+  message, log}` (`log` only when failed).
+- `claude.event {id, kind, ...}`: `session {session, model}`, `text
+  {text}`, `tool {tool, what}`, `result {ok, session, cost, turns, s,
+  text?, stopped?}`. Every run ends with exactly one `result`.
+
+HTTP:
+- `GET /export/file?job=&i=` → the i-th file a job made (its scenes in
+  order, then the joined video). Only files an export made, inside
+  `media/`.
+
 ## HTTP
 
 | Method & path | Returns |
@@ -290,7 +336,7 @@ following the same shape: an intent, never code.
 {"type": "edit.done", "rev": 8, "summary": "...", "diff": [...], "undo": true}
 {"type": "edit.refused", "reason": "x is set every frame by an updater (line 210)",
  "tried": ["shift() chained on get_fog() (line 209): moved (0, -0.25)"]}
-{"type": "file.changed", "file": "...", "rev": 8, "by": "studio|external"}
+{"type": "file.changed", "file": "...", "rev": 8, "by": "studio|external|dependency"}
 {"type": "status", "file": "...", "engine": "tracing|ready|warming|error", "cursors": 9, "of": 12}
 {"type": "error", "code": "parse|crash|timeout|stale|version", "message": "...",
  "where": {"file": "...", "line": 131}, "traceback": "..."}

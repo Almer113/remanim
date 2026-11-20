@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { actionFor } from "./keymap";
 import type { Clip, SceneModel, SoundWave, VoiceLine } from "./types";
 import type { Selection } from "./App";
 
@@ -248,8 +249,9 @@ export function Timeline(p: Props) {
       const tag = (document.activeElement?.tagName ?? "").toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select") return;
       if (document.querySelector(".modal-back")) return;   // a dialog is open
-      if (e.key === "r" || e.key === "R") setRipple((v) => !v);
-      else if (e.key === "m" || e.key === "M") addMarkerRef.current();
+      const a = actionFor(e, false);
+      if (a === "ripple") setRipple((v) => !v);
+      else if (a === "marker") addMarkerRef.current();
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
