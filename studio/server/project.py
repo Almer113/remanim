@@ -557,20 +557,27 @@ class Document:
         # the helper that makes it): what the Inspector shows (Phase 7 step 9)
         # an object made by a helper: the helper's own call, and this call of the
         # helper (where the studio chains its edits) both count
+        # and a later statement that places, scales or turns it (`eq.shift(UP).scale(0.9)`),
+        # since a scale edit chains onto the last of those
+        P = o.get("placement") or {}
+        later = [m["site"] for m in (P.get("move"), P.get("scale"), P.get("rotate"))
+                 if m and m.get("kind") == "static" and m.get("site")]
         spans = []
-        for sp in [o.get("site"), o.get("user_site")] + list(o.get("chain_spans") or []):
+        for sp in [o.get("site"), o.get("user_site")] + list(o.get("chain_spans") or []) + later:
             if sp and list(sp) not in spans:
                 spans.append(list(sp))
-        k, deg, known = 1.0, 0.0, bool(spans)
+        calls, seen = [], set()
         for sp in spans:
             c = self.src.find_call(Span(*sp))
-            st = moveplan.chained_transform(self.src, c) if c is not None else (1.0, 0.0)
-            if st is None:
-                known = False
-                break
-            k, deg = k * st[0], deg + st[1]
-        if known:
-            o["scale_now"], o["turn_now"] = round(k, 4), round(deg, 2)
+            if c is None:
+                continue
+            for t in moveplan.transform_calls(self.src, c, own=sp in [list(s) for s in later]):
+                if id(t) not in seen:  # one .scale() reached from two sites counts once
+                    seen.add(id(t))
+                    calls.append(t)
+        st = moveplan.transform_value(calls) if spans else None
+        if st is not None:
+            o["scale_now"], o["turn_now"] = st
         if o.get("site"):
             call = self.src.find_call(Span(*o["site"]))
             if call is not None:

@@ -183,7 +183,7 @@ export function Inspector({ sel, scene, model, busy, f, onScreen, sendEdit, acti
             edit("duration", n);
             return null;
           }} />
-        {c.kind === "wait" && !locked && (() => {
+        {c.kind === "wait" && !locked && !c.duration_lock && (() => {
           // end this pause where a narration line (or its caption) ends: the next
           // thing then starts after the words, not over them (Phase 7 step 7)
           const ends = (scene.voice ?? [])

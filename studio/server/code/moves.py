@@ -853,7 +853,15 @@ def chained_transform(src: Source, call: ast.Call) -> tuple[float, float] | None
     """The scale factor and turn (degrees) that literal `.scale(k)` /
     `.rotate(a)` calls chained on `call` give it: `Square().scale(1.3)` reads
     1.3. None when a factor in the chain is computed (no honest number)."""
-    k, deg = 1.0, 0.0
+    return transform_value(transform_calls(src, call, own=False))
+
+
+def transform_calls(src: Source, call: ast.Call, own: bool = True) -> list[ast.Call]:
+    """The `.scale()` / `.rotate()` calls chained after `call`, and `call`
+    itself when it is one (`own`): `eq.scale(0.9)` alone is a scale too."""
+    out = []
+    if own and isinstance(call.func, ast.Attribute) and call.func.attr in ("scale", "rotate"):
+        out.append(call)
     node = call
     while True:
         attr = src.parent(node)
@@ -862,15 +870,25 @@ def chained_transform(src: Source, call: ast.Call) -> tuple[float, float] | None
         nxt = src.parent(attr)
         if not (isinstance(nxt, ast.Call) and nxt.func is attr):
             break
-        if attr.attr == "scale":
-            v = number_of(nxt.args[0]) if nxt.args else None
+        if attr.attr in ("scale", "rotate"):
+            out.append(nxt)
+        node = nxt
+    return out
+
+
+def transform_value(calls: list[ast.Call]) -> tuple[float, float] | None:
+    """The scale factor and turn (degrees) these `.scale()` / `.rotate()` calls
+    add up to; None when one of them is computed."""
+    k, deg = 1.0, 0.0
+    for c in calls:
+        if c.func.attr == "scale":
+            v = number_of(c.args[0]) if c.args else None
             if v is None:
                 return None
             k *= v
-        elif attr.attr == "rotate":
-            a = eval_angle(nxt.args[0]) if nxt.args else None
+        else:
+            a = eval_angle(c.args[0]) if c.args else None
             if a is None:
                 return None
             deg += math.degrees(a)
-        node = nxt
     return round(k, 4), round(deg, 2)

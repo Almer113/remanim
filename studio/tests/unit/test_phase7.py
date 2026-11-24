@@ -240,3 +240,21 @@ def test_chained_transform(code, want):
     src = Source(f"x = {code}\n".encode())
     call = next(n for n in ast.walk(src.tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name))
     assert chained_transform(src, call) == want
+
+
+# A scale edit can chain onto the object's last placement statement, not its
+# constructor: the Inspector reads that statement too (found making odd_squares.py)
+from studio.server.code.moves import transform_calls, transform_value  # noqa: E402
+
+
+@pytest.mark.parametrize("code,want", [
+    ("eq.shift(UP * 0.5).scale(0.9)", (0.9, 0.0)),   # the site is eq.shift(...)
+    ("eq.scale(0.9)", (0.9, 0.0)),                   # a scale statement of its own
+    ("eq.rotate(PI / 2).scale(2)", (2.0, 90.0)),
+    ("eq.shift(UP).scale(k)", None),
+])
+def test_transform_of_a_later_statement(code, want):
+    src = Source(f"{code}\n".encode())
+    call = next(n for n in ast.walk(src.tree) if isinstance(n, ast.Call)
+                and isinstance(n.func.value, ast.Name))  # the innermost eq.<method>(...)
+    assert transform_value(transform_calls(src, call)) == want
