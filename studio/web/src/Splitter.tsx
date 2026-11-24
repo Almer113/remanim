@@ -4,13 +4,18 @@
 import { useRef } from "react";
 
 const MIN = 40;
-const maxH = () => Math.round(window.innerHeight * 0.7);
+/** Room the rest of the window needs: header, timeline tools, the code row
+ * (190 px) and a canvas row of at least 200 px. styles.css caps --tl-h the
+ * same way, so a height saved in a taller window can't hide the canvas. */
+export const RESERVED = 470;
+const maxH = () => Math.max(MIN, window.innerHeight - RESERVED);
 
 export function Splitter({ height, onHeight }: { height: number | null; onHeight: (h: number | null) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const current = () => {
     const sc = ref.current?.parentElement?.querySelector(".tl-scroll") as HTMLElement | null;
-    return height ?? sc?.getBoundingClientRect().height ?? 230;
+    // what is on screen (the CSS may have capped a saved height), not what was saved
+    return sc?.getBoundingClientRect().height ?? height ?? 230;
   };
   const clamp = (h: number) => Math.max(MIN, Math.min(maxH(), h));
   return (
@@ -31,7 +36,7 @@ export function Splitter({ height, onHeight }: { height: number | null; onHeight
           e.preventDefault();
           e.stopPropagation();
           onHeight(clamp(current() + (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 80 : 20)));
-        } else if (e.key === "Home") { e.preventDefault(); onHeight(null); }
+        } else if (e.key === "Home") { e.preventDefault(); e.stopPropagation(); onHeight(null); }
       }} />
   );
 }

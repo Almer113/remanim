@@ -1118,9 +1118,11 @@ def plan_scene_order(src: Source, order: list, defined: list) -> Plan:
             raise EditError("the scenes are already in that order")
         text = "SCENES = [" + ", ".join(_string_like(src, None, n) for n in order) + "]" + nl
         end = len(src.data)
-        lead = "" if src.data.endswith(b"\n") else nl
-        blank = nl if not src.data.endswith((b"\n\n", b"\r\n\r\n")) else ""
-        return Plan([Edit(end, end, lead + blank + text)], "SCENES list added at the end of the file",
+        # two blank lines after the last class (PEP 8), counting the ones already there
+        trailing = len(src.data) - len(src.data.rstrip(b"\r\n"))
+        newlines = src.data[end - trailing:].count(b"\n")
+        lead = nl * max(0, 3 - newlines)
+        return Plan([Edit(end, end, lead + text)], "SCENES list added at the end of the file",
                     checks={"scenes": order})
     elts = node.value.elts
     if not all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in elts):
@@ -1362,6 +1364,10 @@ def voice_state(src: Source, scene: str) -> dict:
     return {"silent": False, "owner": None, "line": None}
 
 
+TEMPLATE_SILENT_NOTE = "set a voice to narrate"  # inserts.new_file_text's comments on VOICE
+TEMPLATE_VOICED_NOTE = "the house voice; None for a silent scene"
+
+
 def plan_set_voice(src: Source, scene: str, where: str) -> Plan:
     """Give a silent scene the house voice: on the scene class itself
     (where="class"), or on the base class that sets VOICE = None
@@ -1372,13 +1378,24 @@ def plan_set_voice(src: Source, scene: str, where: str) -> Plan:
     owner = next(c for c in class_chain(src, scene) if c.name == vs["owner"])
     st = _setting(owner, "VOICE")
     lit = _string_like(src, None, HOUSE_VOICE)
+
+    def set_value() -> list[Edit]:
+        # the template's "# set a voice to narrate" would be wrong once it is set:
+        # it becomes the voiced template's comment
+        edits = [Edit(*src.span(st.value), lit)]
+        rest = src.after(st.end_lineno, st.end_col_offset)
+        i = rest.find(TEMPLATE_SILENT_NOTE)
+        if i >= 0 and not rest[:i].strip().strip("#").strip():
+            a = src.offset(st.end_lineno, st.end_col_offset) + len(rest[:i].encode("utf-8"))
+            edits.append(Edit(a, a + len(TEMPLATE_SILENT_NOTE.encode("utf-8")), TEMPLATE_VOICED_NOTE))
+        return edits
     if where == "base":
         if owner.name == scene:
             raise EditError("VOICE = None is on the scene itself, not on a base class")
-        return Plan([Edit(*src.span(st.value), lit)], f"VOICE on {owner.name} → {lit}")
+        return Plan(set_value(), f"VOICE on {owner.name} → {lit}")
     if where != "class":
         raise EditError(f"where must be 'class' or 'base', not {where!r}")
     if owner.name == scene:
-        return Plan([Edit(*src.span(st.value), lit)], f"VOICE → {lit}")
+        return Plan(set_value(), f"VOICE → {lit}")
     cls = class_chain(src, scene)[0]
     return Plan([_class_setting(src, cls, f"VOICE = {lit}")], f"VOICE = {lit} added to {scene}")

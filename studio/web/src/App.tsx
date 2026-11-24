@@ -12,11 +12,9 @@ import { BINDINGS, actionFor, nudgeStep, tip } from "./keymap";
 import { RenderOrderDialog } from "./RenderOrder";
 import { NewFileDialog } from "./NewFileDialog";
 import { SceneDialog, type SceneAction } from "./SceneDialog";
+import { SceneMenu } from "./SceneMenu";
 import { TargetField } from "./TargetField";
 import { Splitter } from "./Splitter";
-
-// the scene dropdown's own entries (a class name has no spaces, so these can't clash)
-const MENU = { add: " add", rename: " rename", delete: " delete", order: " order" };
 
 const conn = new Conn();
 
@@ -392,6 +390,11 @@ export function App() {
   }, [sel]);
 
   const canEdit = ready && !busy && !preview && !err && rest && !playing;
+  // adding, renaming or deleting a scene class doesn't need this scene to trace
+  // (the server allows them on a scene with an error) nor playback to be stopped:
+  // opening the dialog stops it. Only a module that doesn't load blocks them.
+  const sceneCan = ready && !busy && !preview && !model?.error;
+  const openSceneDialog = (a: SceneAction) => { setPlaying(false); setRest(true); setSceneAction(a); };
   const [textEdit, setTextEdit] = useState<Obj | null>(null);
   useEffect(() => setTextEdit(null), [model?.rev, scene?.name, f]);
   const onTextDone = useCallback(async (changes: { span: Span; value: string }[] | null) => {
@@ -580,8 +583,9 @@ export function App() {
         if (e.key === "Escape") { e.preventDefault(); setExportOpen(false); }
         return;
       }
-      if (newOpen) return;  // the dialog's own keys (it closes itself on Escape)
-      if (sceneAction) return;  // the dialog's own keys
+      // the dialogs' own keys; Escape closes them even when focus fell to the page
+      if (newOpen) { if (e.key === "Escape") { e.preventDefault(); setNewOpen(false); } return; }
+      if (sceneAction) { if (e.key === "Escape") { e.preventDefault(); setSceneAction(null); } return; }
       if (orderOpen) {
         if (e.key === "Escape") { e.preventDefault(); setOrderOpen(false); }
         return;
@@ -654,27 +658,18 @@ export function App() {
         </select>
         <button onClick={() => setNewOpen(true)} title="A new scene file from the studio template">+ New file</button>
         {model && (
-          <select value={scene?.name ?? ""} title="Scene" onChange={(e) => {
-            const v = e.target.value;
-            if (v === MENU.order) setOrderOpen(true);
-            else if (v === MENU.add) setSceneAction("add");
-            else if (v === MENU.rename) setSceneAction("rename");
-            else if (v === MENU.delete) setSceneAction("delete");
-            else chooseScene(v);
-          }}>
+          <select value={scene?.name ?? ""} title="Scene" aria-label="Scene" onChange={(e) => chooseScene(e.target.value)}>
             {model.scenes.map((s) => <option key={s.name} value={s.name}>{s.name}{s.pending ? " (tracing…)" : ""}</option>)}
-            {scene && (
-              <optgroup label="Scenes">
-                <option value={MENU.add}>New scene…</option>
-                <option value={MENU.rename}>Rename {scene.name}…</option>
-                {model.scenes.length > 1 && <option value={MENU.delete}>Delete {scene.name}…</option>}
-                {model.scenes.length > 1 && <option value={MENU.order}>Render order…</option>}
-              </optgroup>
-            )}
           </select>
         )}
-        {model && scene && <button disabled={!canEdit} onClick={() => setSceneAction("add")}
+        {model && scene && <button disabled={!sceneCan} onClick={() => openSceneDialog("add")}
           title="A new scene class in this file">+ scene</button>}
+        {model && scene && <SceneMenu disabled={!sceneCan} items={[
+          { label: `Rename ${scene.name}…`, run: () => openSceneDialog("rename") },
+          { label: `Delete ${scene.name}…`, run: () => openSceneDialog("delete"), disabled: model.scenes.length < 2,
+            title: model.scenes.length < 2 ? "The file's only scene" : undefined },
+          { label: "Render order…", run: () => { setPlaying(false); setOrderOpen(true); }, disabled: model.scenes.length < 2 },
+        ]} />}
         {model && model.scenes.length > 1 && scene && (() => {
           const i = model.scenes.findIndex((s) => s.name === scene.name);
           const n = model.scenes.length;
@@ -716,7 +711,7 @@ export function App() {
       {helpOpen && <HelpSheet onClose={() => setHelpOpen(false)} />}
       {newOpen && <NewFileDialog conn={conn} onCreated={fileCreated} onClose={() => setNewOpen(false)} />}
       {sceneAction && model && scene && (
-        <SceneDialog action={sceneAction} scene={scene.name} busy={!canEdit}
+        <SceneDialog action={sceneAction} scene={scene.name} busy={!sceneCan}
           last={model.scenes[model.scenes.length - 1]?.name === scene.name}
           onClose={() => setSceneAction(null)}
           onSubmit={(msg) => {

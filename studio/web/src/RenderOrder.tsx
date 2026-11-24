@@ -20,7 +20,8 @@ export function RenderOrderDialog({ names, current, canEdit, onMove, onClose }: 
       <div className="modal order" role="dialog" aria-modal="true" aria-labelledby="order-title" tabIndex={-1} ref={boxRef}
         onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); } }}>
         <h4 id="order-title">Render order</h4>
-        <p className="muted">The order Export and plain <code>manim -a</code> use (the file's <code>SCENES</code> list). Each move is one undo step.</p>
+        <p className="muted">The order reManim and Export use: the file's <code>SCENES</code> list, made by the first move if the file
+          has none. Plain <code>manim -a</code> ignores it (Manim renders a file's scenes alphabetically). Each move is one undo step.</p>
         <ol className="order-list">
           {names.map((n, i) => (
             <li key={n} className={n === current ? "on" : ""}>

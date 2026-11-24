@@ -55,10 +55,10 @@ TOKEN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 background:#15171c;color:#e6e8eb;font:15px system-ui,sans-serif}form{width:min(360px,100% - 32px)}
 img{width:64px;height:64px;border-radius:14px}input,button{font:inherit;width:100%;box-sizing:border-box;
 margin-top:8px;padding:8px 10px;border-radius:6px;border:1px solid #2f343e;background:#23272f;color:#e6e8eb}
-button{background:#3b8cff;border-color:#3b8cff;color:#fff}p{color:#8b929b;line-height:1.4}</style></head>
-<body><form method="get" action="/"><img src="/icons/icon-192.png" alt=""><h2><img src="/icons/wordmark-dark.svg" alt="reManim" height="40"></h2>
+button{background:#3b8cff;border-color:#3b8cff;color:#fff}p{color:#8b929b;line-height:1.4}p.bad{color:#e0614f}</style></head>
+<body><form method="post" action="/"><img src="/icons/icon-192.png" alt=""><h2><img src="/icons/wordmark-dark.svg" alt="reManim" height="40"></h2>
 <p>From another device, reManim needs its access token once. It is in
-<code>studio/data/access_token</code> on the PC, and in the link the server printed at start-up.</p>
+<code>studio/data/access_token</code> on the PC.</p><!--wrong-->
 <input name="token" type="password" autocomplete="current-password" placeholder="Access token" required autofocus>
 <button type="submit">Open</button></form></body></html>"""
 
@@ -97,6 +97,16 @@ def is_local(req) -> bool:
     return _host_name(req.host or "") in LOCAL_HOSTS and not proxied(req)
 
 
+def token_ok(given: str) -> bool:
+    """The access token, compared in constant time. Bytes, not str: compare_digest
+    raises on a non-ASCII str, which would turn a stranger's guess into a 500."""
+    try:
+        return bool(ACCESS_TOKEN) and bool(given) and hmac.compare_digest(
+            given.encode("utf-8", "surrogateescape"), ACCESS_TOKEN.encode("utf-8"))
+    except (TypeError, ValueError):
+        return False
+
+
 @web.middleware
 async def local_only(req: web.Request, handler):
     """Opening a file runs it and edits write code, so only this machine's
@@ -105,33 +115,40 @@ async def local_only(req: web.Request, handler):
     name = _host_name(req.host or "")
     if not _known_host(name):
         raise web.HTTPForbidden(text="the studio only answers on localhost")
-    set_cookie = False
-    install = req.method == "GET" and (req.path in INSTALL_FILES or INSTALL_ICON.fullmatch(req.path))
-    if not is_local(req) and not install:
-        # another machine (a tailnet name): only with the start-up link's token
-        given = req.cookies.get(TOKEN_COOKIE) or ""
-        if not (ACCESS_TOKEN and hmac.compare_digest(given, ACCESS_TOKEN)):
-            q = req.query.get("token", "")
-            if not (ACCESS_TOKEN and q and hmac.compare_digest(q, ACCESS_TOKEN)):
-                if req.method == "GET" and req.path == "/":
-                    # a page a person (or an installed app) can get past: paste the token once
-                    return web.Response(status=403, text=TOKEN_PAGE, content_type="text/html",
-                                        headers={"Cache-Control": "no-store"})
-                raise web.HTTPForbidden(text="open the link the studio printed when it started (it carries a token)")
-            set_cookie = True
     origin = req.headers.get("Origin")
     if origin is not None and origin not in DEV_ORIGINS and not _same_server(origin, req.host):
         raise web.HTTPForbidden(text="cross-origin requests are not allowed")
     # `<img src="http://127.0.0.1:8770/frame?...">` on another site sends no Origin
     if req.headers.get("Sec-Fetch-Site") == "cross-site" and origin not in DEV_ORIGINS:
         raise web.HTTPForbidden(text="cross-site requests are not allowed")
-    if set_cookie:
-        # drop the token from the address bar; the cookie carries it from here on
-        resp = web.HTTPFound(req.rel_url.with_query({k: v for k, v in req.query.items() if k != "token"}))
-        resp.set_cookie(TOKEN_COOKIE, ACCESS_TOKEN, httponly=True, secure=True, samesite="Strict",
-                        max_age=TOKEN_DAYS * 24 * 3600)
-        raise resp
+    install = req.method == "GET" and (req.path in INSTALL_FILES or INSTALL_ICON.fullmatch(req.path))
+    if not is_local(req) and not install and not token_ok(req.cookies.get(TOKEN_COOKIE) or ""):
+        # another machine (a tailnet name): only with the token, once; a cookie carries it after
+        if req.method == "POST" and req.path == "/":
+            # the token page's form: in the body, so the token never sits in a URL or the history
+            form = await req.post()
+            if token_ok(str(form.get("token") or "")):
+                raise _with_cookie(web.HTTPSeeOther("/"))
+            return _token_page(wrong=True)
+        if token_ok(req.query.get("token", "")):
+            # the link printed at start-up: drop the token from the address bar
+            raise _with_cookie(web.HTTPFound(req.rel_url.with_query(
+                {k: v for k, v in req.query.items() if k != "token"})))
+        if req.method == "GET" and req.path == "/":
+            return _token_page()  # a page a person (or an installed app) can get past: enter the token once
+        raise web.HTTPForbidden(text="open reManim's address and enter its access token")
     return await handler(req)
+
+
+def _with_cookie(resp):
+    resp.set_cookie(TOKEN_COOKIE, ACCESS_TOKEN, httponly=True, secure=True, samesite="Strict",
+                    max_age=TOKEN_DAYS * 24 * 3600)
+    return resp
+
+
+def _token_page(wrong: bool = False) -> web.Response:
+    text = TOKEN_PAGE.replace("<!--wrong-->", "<p class=\"bad\">That isn&#39;t the token; try again.</p>" if wrong else "")
+    return web.Response(status=403, text=text, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 def normalise(name: str) -> str:
@@ -481,6 +498,19 @@ async def ws_handler(req):
     return ws
 
 
+def shadows_module(stem: str) -> bool:
+    """Would a file called `stem`.py hide a module a scene imports? The scene's
+    own folder comes first on the import path, so manim.py there replaces Manim."""
+    import importlib.util
+    import sys
+    if stem in sys.stdlib_module_names or stem in sys.builtin_module_names:
+        return True
+    try:
+        return importlib.util.find_spec(stem) is not None  # installed, or the project's own (style, manim_kit)
+    except (ImportError, ValueError):
+        return False
+
+
 async def new_file(msg: dict) -> dict:
     """A new scene file from the code_spec §6 template; never overwrites."""
     import re
@@ -498,6 +528,10 @@ async def new_file(msg: dict) -> dict:
         return {"type": "error", "message": "that folder holds tools, not scenes"}
     if path.exists():
         return {"type": "error", "message": f"{name} already exists"}
+    if shadows_module(path.stem):
+        # manim.py, numpy.py, math.py or style.py next to scene files is imported instead of
+        # the real module, and every scene there stops working
+        return {"type": "error", "message": f"{path.stem} is the name of a module scenes import; pick another name"}
     scene = str(msg.get("scene") or "") or "".join(w.capitalize() for w in re.split(r"[_\W]+", path.stem) if w) \
         or "NewScene"
     if not scene[0].isalpha():
@@ -540,6 +574,21 @@ async def handle(msg: dict) -> dict | None:
         return {"type": "export.revealed"}
     if t == "export.list":
         return {"type": "export.jobs", "jobs": [j.view() for j in hub.exporter.jobs.values()]}
+    if t == "export.drafts":
+        # low-quality renders on disk that are newer than the file: the export dialog's
+        # "low quality first" check counts them, not only exports since the server started
+        from .export import QUALITIES
+        try:
+            name = normalise(str(msg.get("file") or ""))
+        except web.HTTPBadRequest as e:
+            return {"type": "error", "message": e.text}
+        src = ROOT / name
+        d = ROOT / "media" / "videos" / src.stem / QUALITIES["l"]
+        newer = []
+        if d.is_dir():
+            t0 = src.stat().st_mtime
+            newer = sorted(f.stem for f in d.glob("*.mp4") if f.stat().st_mtime >= t0)
+        return {"type": "export.drafts", "file": name, "scenes": newer}
     doc = hub.docs.get(msg.get("file", ""))
     if doc is None:
         return {"type": "error", "message": "file not open"}

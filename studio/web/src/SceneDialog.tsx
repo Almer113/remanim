@@ -61,8 +61,10 @@ export function SceneDialog({ action, scene, last, busy, onSubmit, onClose }: {
               disabled={last} />At the end</label>
           </div>
         </>)}
-        {action === "rename" && <p className="muted small">The class, and the file's SCENES list and render order if it has them.</p>}
-        {action === "delete" && <p>The class {scene} and everything in it goes; Undo brings it back.</p>}
+        {action === "rename" && <p className="muted small">The class, and the file's SCENES list and render order if it has them.
+          Other files that import it aren't checked.</p>}
+        {action === "delete" && <p>The class {scene} and everything in it goes; Undo brings it back.
+          Other files that import it aren't checked.</p>}
         {error && <p className="err" role="alert">{error}</p>}
         <div className="btns">
           <button type="button" onClick={onClose}>Cancel</button>

@@ -77,6 +77,19 @@ the server with no window on port 8770, with
 The pid file, the log (`server.log`) and the token are in `studio/data/`,
 which git ignores. Restart it after changing server code.
 
+About the token:
+- The log never contains it. `server.log` only names the file it's in,
+  because the Hub shows that log to anyone on the tailnet.
+- The token page sends it with a form post, so it doesn't end up in
+  browser history.
+- If you edit the file by hand, use at least 8 printable ASCII
+  characters with no spaces. The server refuses to start on a token it
+  can't use rather than replacing it. An empty file gets a new random
+  token.
+- You can't log out a single device. To shut out a lost phone, delete
+  `studio/data/access_token` and run `serve.py restart`. Every device then
+  needs the new token.
+
 | From | Address |
 |---|---|
 | This PC | <http://localhost:8770/> |

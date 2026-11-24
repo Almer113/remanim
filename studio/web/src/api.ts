@@ -84,16 +84,22 @@ export class Conn {
   }
 
   /** Send and wait for the reply that carries the same seq. Always settles:
-   * with the reply, or with an error message on disconnect or timeout. */
+   * with the reply, or with an error message on disconnect or timeout.
+   * Never queued: a request made while the connection is down is answered
+   * at once with an error, so an edit the UI called failed can't be sent
+   * later, when the connection comes back. */
   request(msg: object): Promise<any> {
     const seq = this.seq++;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.resolve({ type: "error", seq, message: "Not connected to the studio server; try again when it reconnects" });
+    }
     return new Promise((resolve) => {
       const timer = window.setTimeout(() => {
         this.waiting.delete(seq);
         resolve({ type: "error", seq, message: "No answer from the studio server in time" });
       }, REPLY_TIMEOUT_MS);
       this.waiting.set(seq, { resolve, timer });
-      this.send({ ...msg, seq });
+      this.ws!.send(JSON.stringify({ ...msg, seq }));
     });
   }
 }

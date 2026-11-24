@@ -109,6 +109,29 @@ def content_end(tr: dict) -> float:
     return round(end, 4)
 
 
+def ending_waits(tr: dict, fps: float) -> dict[int, str]:
+    """The waits TimedScene adds after construct() (manim_kit lock_to_target):
+    first one until the last narration line ends, then the padding up to
+    TARGET. Index → "padding" (the last one, ending on TARGET) or "narration"
+    (any other in that trailing run of waits no scene-file call made, in a
+    scene with narration). Others aren't listed."""
+    evs = tr.get("events") or []
+    k = len(evs)
+    while k > 0 and evs[k - 1].get("call") is None and evs[k - 1]["kind"] == "wait":
+        k -= 1
+    audio = tr.get("audio") or {}
+    narrated = bool(audio.get("lines") or audio.get("captions"))
+    target = tr.get("target")
+    out = {}
+    for i in range(k, len(evs)):
+        e = evs[i]
+        if i == len(evs) - 1 and target and abs(e["start"] + e["duration"] - float(target)) <= 1.5 / max(1, fps):
+            out[i] = "padding"
+        elif narrated:
+            out[i] = "narration"
+    return out
+
+
 # animations that take things off the screen (Phase 7 step 6)
 REMOVERS = {"FadeOut", "Uncreate", "Unwrite", "ShrinkToCenter", "FadeOutAndShift"}
 SPEECH_GRACE = 0.5  # s into a line before a fade counts as mid-sentence
@@ -728,15 +751,18 @@ class Document:
         speech = speech_warnings(tr)
         n_play = 0
         seen_calls: dict = {}  # pass of a loop: how many earlier events the same call made
+        end_waits = ending_waits(tr, self.meta.get("fps", 15))
         for i, ev in enumerate(tr["events"]):
             call = self.src.find_call(Span(*ev["call"])) if ev.get("call") and self.src.ok else None
             name = Source.call_name(call) if call is not None else None
             lock = None
-            padding = ev.get("call") is None and ev["kind"] == "wait" and i == len(tr["events"]) - 1 \
-                and bool(tr.get("target"))
+            ending = end_waits.get(i)
+            padding = ending == "padding"
             if padding:
                 tl = self._target_line(tr)
                 lock = "padding to TARGET" + (f" (line {tl})" if tl else "") + ": change the scene's length instead"
+            elif ending == "narration":
+                lock = "waiting for the last narration line to end: move or shorten that line instead"
             elif ev.get("in_helper"):
                 lock = f"inside {ev.get('func')}() — editing it would change every use"
             elif name not in ("play", "wait", "at"):
@@ -1879,7 +1905,10 @@ class Document:
             stack.pop()
             other.append(step)
             await self._reload_for_reply()
-            return {"type": "edit.done", "summary": f"{which}: {step.note}", "diff": diff, "rev": self.rev}
+            # "undone: TARGET 13.47 → 12.97" names the edit taken back; "undo: …" read as if
+            # the arrow were what just happened (odd_squares friction 5)
+            done = "undone" if which == "undo" else "redone"
+            return {"type": "edit.done", "summary": f"{done}: {step.note}", "diff": diff, "rev": self.rev}
 
     # -- external changes ---------------------------------------------------------
     async def file_changed(self):

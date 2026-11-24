@@ -110,7 +110,7 @@ def test_add_with_decorator_and_keywords():
 
 
 @pytest.mark.parametrize("bad,why", [("Hook", "already"), ("Beat", "already"), ("2x", "not a class"),
-                                     ("class", "not a class"), ("Circle", "Manim")])
+                                     ("class", "reserves"), ("None", "reserves"), ("Circle", "Manim")])
 def test_add_refuses_bad_names(bad, why):
     with pytest.raises(EditError, match=why):
         plan_scene_add(Source(BEATS.encode()), "Hook", bad, "after", ["Hook", "Walk"], {"Circle"})
@@ -217,7 +217,8 @@ def test_set_voice_on_the_scene_or_its_base():
     assert 'class Beat(TimedScene):\n    VOICE = "en-US-AndrewNeural"\n    CAPTIONS' in out
     t = new_file_text("A")
     out = _run(t, plan_set_voice(Source(t.encode()), "A", "class"))
-    assert 'VOICE = "en-US-AndrewNeural"  # set a voice to narrate' in out
+    assert 'VOICE = "en-US-AndrewNeural"  # the house voice; None for a silent scene' in out
+    assert "set a voice to narrate" not in out
     with pytest.raises(EditError, match="not on a base"):
         plan_set_voice(Source(t.encode()), "A", "base")
     t = new_file_text("A", voice=True)

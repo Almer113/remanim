@@ -51,6 +51,11 @@ export function ExportDialog({ conn, file, scenes, active, jobs, onClose }: {
   const boxRef = useRef<HTMLDivElement>(null);
   useEffect(() => { boxRef.current?.focus(); }, []);
   useEffect(() => { save(file, c); }, [file, c]);
+  // low-quality renders already on disk, newer than the file (they survive a server restart)
+  const [drafts, setDrafts] = useState<string[]>([]);
+  useEffect(() => {
+    conn.request({ type: "export.drafts", file }).then((r) => { if (r.type === "export.drafts") setDrafts(r.scenes); });
+  }, [conn, file, jobs]);
 
   const chosen = useMemo(() => {
     if (c.which === "this") return active ? [active] : [];
@@ -63,7 +68,8 @@ export function ExportDialog({ conn, file, scenes, active, jobs, onClose }: {
   const mine = jobs.filter((j) => j.file === file).slice().reverse();
   const running = mine.some((j) => RUNNING.has(j.state));
   // CLAUDE.md: high quality only after the low-quality render of the same scenes has been looked at
-  const draftDone = mine.some((j) => j.state === "done" && j.spec.quality === "l" && chosen.every((s) => j.spec.scenes.includes(s)));
+  const draftDone = mine.some((j) => j.state === "done" && j.spec.quality === "l" && chosen.every((s) => j.spec.scenes.includes(s)))
+    || (chosen.length > 0 && chosen.every((s) => drafts.includes(s)));
   const highFirst = (c.quality === "h" || c.quality === "k") && !draftDone;
 
   const start = () => {

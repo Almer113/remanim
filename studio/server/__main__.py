@@ -86,12 +86,19 @@ def access_token(path: str | None) -> str:
     import secrets
     if path:
         f = Path(path)
-        try:
-            t = f.read_text(encoding="ascii").strip()
-            if len(t) >= 8:
+        t = ""
+        if f.exists():
+            # a file someone wrote is never replaced behind their back: a token that can't
+            # be used stops the start with the reason (utf-8-sig: Notepad may add a BOM)
+            try:
+                t = f.read_text(encoding="utf-8-sig").strip()
+            except (OSError, UnicodeDecodeError) as e:
+                sys.exit(f"Can't read the access token in {path} ({e}); fix or delete the file")
+            if t and not (len(t) >= 8 and t.isascii() and t.isprintable() and " " not in t):
+                sys.exit(f"The access token in {path} must be at least 8 characters: letters, digits "
+                         "or punctuation, no spaces. Fix the file, or delete it for a new random token")
+            if t:
                 return t
-        except (OSError, UnicodeDecodeError):
-            pass
         t = secrets.token_urlsafe(24)
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(t, encoding="ascii")
@@ -139,7 +146,12 @@ def main():
         if args.token_file:
             app.TOKEN_DAYS = 400  # the longest a browser keeps a cookie
         for h in sorted(app.TRUSTED_HOSTS):
-            print(f"  from other machines: https://{h}:{args.port}/?token={app.ACCESS_TOKEN}", flush=True)
+            if args.token_file:
+                # a kept token never goes in the output: under the hub it ends up in a log file
+                # anyone who can open the hub can read
+                print(f"  from other machines: https://{h}:{args.port}/ (the token is in {args.token_file})", flush=True)
+            else:
+                print(f"  from other machines: https://{h}:{args.port}/?token={app.ACCESS_TOKEN}", flush=True)
     if args.app:
         open_app_window(f"http://127.0.0.1:{args.port}/")
     web.run_app(make_app(), host="127.0.0.1", port=args.port, print=None)

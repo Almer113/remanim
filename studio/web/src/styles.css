@@ -167,6 +167,13 @@ input.dirty { border-color: #c9a23a; }
 .tl-pop .btns-row { margin: 4px 0 0; }
 .scene-order { display: inline-flex; gap: 3px; align-items: center; }
 .scene-order button { padding: 1px 6px; }
+.scene-menu { position: relative; display: inline-flex; }
+.scene-menu > button { padding: 1px 7px; }
+.scene-menu .menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 40; display: flex; flex-direction: column;
+  min-width: 170px; padding: 4px; background: var(--panel); border: 1px solid var(--line, #333); border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35); }
+.scene-menu .menu button { text-align: left; background: transparent; border: 0; padding: 5px 8px; border-radius: 4px; white-space: nowrap; }
+.scene-menu .menu button:hover:not(:disabled), .scene-menu .menu button:focus-visible { background: var(--hover, rgba(255,255,255,.08)); }
 button.ghost { background: transparent; border-color: transparent; padding: 0 4px; }
 /* easing picker */
 .easing { position: relative; }
@@ -323,7 +330,9 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4p
 .line-ends button.small { padding: 1px 6px; font-size: 11.5px; }
 .row input.computed { color: var(--muted, #8a93a3); background: transparent; border-style: dashed; cursor: help; }
 /* a height the user picked with the splitter is the height, not just a cap */
-.tl-sized .tl-scroll { height: var(--tl-h); max-height: none; }
+/* never more than the window can spare (Splitter.tsx RESERVED): a height saved in a
+   taller window, or a window made smaller, must leave the canvas row its 200 px */
+.tl-sized .tl-scroll { height: min(var(--tl-h), max(40px, calc(100vh - 470px))); max-height: none; }
 .split-h { height: 6px; margin-top: -3px; cursor: ns-resize; position: relative; z-index: 5; }
 .split-h::after { content: ""; position: absolute; left: 50%; top: 2px; width: 40px; height: 2px; margin-left: -20px; border-radius: 1px; background: var(--line); }
 .split-h:hover::after, .split-h:focus-visible::after { background: var(--sel); }

@@ -172,7 +172,8 @@ median 9.6 ms, p95 18.3 ms, max 34.9 ms.
 
 - E15: the 200 ms frame on the first scrub after the window is shown;
   probably the browser, not proven.
-- Friction entries 1, 2, 5, 6, 7, 8 and 10 (above).
+- Friction entries 1, 2, 6 and 8 (above). 5, 7 and 10 were fixed in the
+  review after Phase 7 (`docs/review_phase7.md`).
 - The corpus summary should count load timeouts.
 - Carried: z moves in 3D, an out-of-camera view in 2D.
 - Name and licence (waiting for a decision).

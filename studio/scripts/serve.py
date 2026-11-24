@@ -102,6 +102,16 @@ def build_ui() -> str | None:
     return None
 
 
+def hub_server(pid: int) -> bool:
+    """Is `pid` alive and a reManim server this script started? A pid can be reused
+    by a later process, even another studio (a dev copy, reManim.cmd): only ours has
+    this port and the kept token file in its command line."""
+    if not alive(pid):
+        return False
+    cmd = command_line(pid)
+    return "studio.server" in cmd and "--token-file" in cmd and f"--port {PORT}" in cmd
+
+
 def status() -> dict:
     rec = recorded()
     h = health()
@@ -110,7 +120,7 @@ def status() -> dict:
         if not rec or rec.get("pid") != h.get("pid"):
             out["message"] = "started outside the hub (a terminal or a Claude preview)"
         return out
-    if rec and alive(rec["pid"]) and "studio.server" in command_line(rec["pid"]):
+    if rec and hub_server(rec["pid"]):
         return {"running": True, "ours": True, "pid": rec["pid"], "since": rec.get("since"),
                 "message": "running but not answering"}
     if port_busy():
@@ -160,8 +170,13 @@ def start() -> int:
             say(f"reManim is running on http://127.0.0.1:{PORT}/ (pid {h.get('pid')})")
             return 0
         if p.poll() is not None:
+            h = health(1.0)
+            if h:  # another start won the port (two starts at once): that one is running
+                say(f"reManim is running on http://127.0.0.1:{PORT}/ (pid {h.get('pid')})")
+                return 0
             tail = LOG.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-1:]
-            PIDFILE.unlink(missing_ok=True)
+            if (recorded() or {}).get("pid") == p.pid:  # only our own record, not the winner's
+                PIDFILE.unlink(missing_ok=True)
             say(f"The server exited at start-up: {tail[0] if tail else 'see studio/data/server.log'}")
             return 1
         time.sleep(0.2)
@@ -179,7 +194,7 @@ def stop() -> int:
         say("reManim isn't running")
         return 0
     pid = rec["pid"]
-    ours = (h and h.get("pid") == pid) or (alive(pid) and "studio.server" in command_line(pid))
+    ours = (h and h.get("pid") == pid) or hub_server(pid)
     if not ours:
         PIDFILE.unlink(missing_ok=True)
         if h:

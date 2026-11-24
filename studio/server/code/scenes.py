@@ -39,7 +39,9 @@ def _module_names(src: Source) -> set[str]:
 
 def _check_new_name(src: Source, name, taken: set[str]) -> str:
     name = str(name or "").strip()
-    if not name.isidentifier() or keyword.iskeyword(name) or not name.isascii():
+    if keyword.iskeyword(name):
+        raise EditError(f"{name} is a word Python reserves; pick another name")
+    if not name.isidentifier() or not name.isascii():
         raise EditError(f"not a class name: {name!r} (letters, digits and _, not starting with a digit)")
     if name in _module_names(src):
         raise EditError(f"the file already defines {name}")
@@ -73,23 +75,49 @@ def _list_edits(src: Source, op: str, name: str, new: str | None, after: str | N
         raise EditError(f"SCENES (line {node.lineno}) isn't a plain list of names; change it in the code")
     names = [e.value for e in elts]
     spans = [src.span(e) for e in elts]
+    tup = isinstance(node.value, ast.Tuple)
+    # one name per line (each with its own comment, perhaps): edit whole lines, so
+    # every comment stays with its name
+    def tail(e) -> str:
+        return src.after(e.end_lineno, e.end_col_offset).strip()
+
+    def alone(e) -> bool:  # nothing else on its line but a comma and a comment
+        t = tail(e)
+        t = t[1:].lstrip() if t.startswith(",") else t
+        return e.lineno == e.end_lineno and not src.before(e.lineno, e.col_offset).strip() \
+            and (t == "" or t.startswith("#"))
+    per_line = len({e.lineno for e in elts}) == len(elts) and all(alone(e) for e in elts)
+
+    def comma_after(i: int) -> bool:
+        return tail(elts[i]).startswith(",")
     if op == "add":
         if not elts:
             a = src.span(node.value)[0] + 1
-            return [Edit(a, a, _string_like(src, None, new))], names
+            # ("C") would be a string, not a tuple
+            return [Edit(a, a, _string_like(src, None, new) + ("," if tup else ""))], names
         i = names.index(after) if after in names else len(names) - 1
-        return [Edit(spans[i][1], spans[i][1], ", " + _string_like(src, elts[i], new))], names
+        q = _string_like(src, elts[i], new)
+        if per_line:
+            e = elts[i]
+            line = src.indent_of(e.lineno) + q + ("," if comma_after(i) else "") + src.newline
+            fix = [] if comma_after(i) else [Edit(spans[i][1], spans[i][1], ",")]
+            at = src.line_end(e.lineno)
+            return fix + [Edit(at, at, line)], names
+        return [Edit(spans[i][1], spans[i][1], ", " + q)], names
     if name not in names:
         return [], names
     i = names.index(name)
     if op == "rename":
         return [Edit(*spans[i], _string_like(src, elts[i], new))], names
+    if len(names) == 1:  # the list empties: () or [] (a lone name's comma can't stay behind)
+        return [Edit(*src.span(node.value), "()" if tup else "[]")], names
+    if per_line:  # the whole line, comment and all
+        e = elts[i]
+        return [Edit(src.line_starts[e.lineno - 1], src.line_end(e.lineno), "")], names
     # delete: the name and one comma
     if i < len(names) - 1:
         return [Edit(spans[i][0], spans[i + 1][0], "")], names
-    if i > 0:
-        return [Edit(spans[i - 1][1], spans[i][1], "")], names
-    return [Edit(*spans[i], "")], names
+    return [Edit(spans[i - 1][1], spans[i][1], "")], names
 
 
 def _doc_edits(src: Source, order: list[str], op: str, name: str, new: str | None, after: str | None) -> list[Edit]:
@@ -100,7 +128,10 @@ def _doc_edits(src: Source, order: list[str], op: str, name: str, new: str | Non
     d0, d1 = src.span(src.tree.body[0])
     text = src.data[d0:d1].decode("utf-8")
     pat = re.compile(r",\s+".join(r"\b(" + re.escape(n) + r")\b" for n in order))
-    found = list(pat.finditer(text))
+    # only a list that follows a label ("Render order: A, B", "Beats: A, B"), never
+    # prose that happens to name a scene ("Intro scene for the Euler video")
+    label = re.compile(r"(?i)\b(?:render\s+order|order|beats|scenes)\s*:\s*$")
+    found = [m for m in pat.finditer(text) if label.search(text[:m.start()])]
     if len(found) != 1:
         return []
     m = found[0]
@@ -149,6 +180,23 @@ def _first_call(fn: ast.FunctionDef | None, name: str) -> bool:
         and st.value.func.id == name and not st.value.args and not st.value.keywords
 
 
+def _class_end(src: Source, cls: ast.ClassDef) -> int:
+    """The class's last line, counting comment lines indented under it that come
+    after its last statement (commented-out code, a note): they belong to it."""
+    deep = len(src.indent_of(cls.lineno))
+    last = ln = cls.end_lineno
+    while ln < len(src.line_starts):
+        ln += 1
+        t = src.line_text(ln)
+        if not t.strip():
+            continue
+        if t.lstrip().startswith("#") and len(src.indent_of(ln)) > deep:
+            last = ln
+            continue
+        break
+    return last
+
+
 def plan_scene_add(src: Source, current: str, name, where: str, defined: list[str], taken: set[str]) -> Plan:
     """A new scene class after `current` (where="after") or after the file's
     last scene class (where="end"): the same base classes as `current`, its
@@ -181,7 +229,7 @@ def plan_scene_add(src: Source, current: str, name, where: str, defined: list[st
         anchor = cur
     else:
         anchor = [n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name in defined][-1]
-    end = src.line_end(anchor.end_lineno)
+    end = src.line_end(_class_end(src, anchor))
     lead = nl if end == len(src.data) and not src.data.endswith(b"\n") else ""
     edits = [Edit(end, end, lead + nl + nl + text)]
     order_edits, also = _order_edits(src, defined, "add", new=name,
@@ -201,7 +249,7 @@ def _class_lines(src: Source, cls: ast.ClassDef) -> tuple[int, int]:
     a = src.line_starts[start_line - 1]
     if start_line == 1:  # nothing before it: keep the blank lines after it instead
         a = src.line_starts[first - 1]
-    return a, src.line_end(cls.end_lineno)
+    return a, src.line_end(_class_end(src, cls))
 
 
 def plan_scene_delete(src: Source, name: str, defined: list[str]) -> Plan:
