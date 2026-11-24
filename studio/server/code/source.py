@@ -44,6 +44,10 @@ class Source:
         except SyntaxError as e:
             self.error = e
         self._parents: dict[int, ast.AST] | None = None
+        # lookup indexes, built on first use: the tree never changes after parsing
+        self._calls_by_end: dict[tuple[int, int], list[ast.Call]] | None = None
+        self._statement_at: dict[int, ast.AST] | None = None
+        self._arg_of: dict[int, ast.Call] | None = None
 
     # -- positions -----------------------------------------------------------
     @property
@@ -103,12 +107,25 @@ class Source:
 
     def statement_at(self, line: int):
         """The innermost simple statement covering `line`."""
-        best = None
-        for node in ast.walk(self.tree):
-            if isinstance(node, SIMPLE_STATEMENTS) and node.lineno <= line <= node.end_lineno:
-                if best is None or node.lineno >= best.lineno:
-                    best = node
-        return best
+        if self._statement_at is None:  # one pass: for each line, the latest-starting statement over it
+            self._statement_at = {}
+            for node in ast.walk(self.tree):
+                if isinstance(node, SIMPLE_STATEMENTS):
+                    for ln in range(node.lineno, node.end_lineno + 1):
+                        best = self._statement_at.get(ln)
+                        if best is None or node.lineno >= best.lineno:
+                            self._statement_at[ln] = node
+        return self._statement_at.get(line)
+
+    def enclosing_call(self, call: ast.Call) -> ast.Call | None:
+        """The call that has `call` as one of its arguments, if any."""
+        if self._arg_of is None:
+            self._arg_of = {}
+            for node in ast.walk(self.tree):
+                if isinstance(node, ast.Call):
+                    for a in list(node.args) + [k.value for k in node.keywords]:
+                        self._arg_of.setdefault(id(a), node)
+        return self._arg_of.get(id(call))
 
     def find_call(self, span: Span) -> ast.Call | None:
         """The Call node at `span`, as reported by co_positions().
@@ -118,10 +135,12 @@ class Source:
         otherwise; both are accepted. The end must match exactly."""
         if self.tree is None:
             return None
-        for node in ast.walk(self.tree):
-            if not isinstance(node, ast.Call) or \
-                    (node.end_lineno, node.end_col_offset) != (span.end_line, span.end_col):
-                continue
+        if self._calls_by_end is None:  # every Call by where it ends, in ast.walk order
+            self._calls_by_end = {}
+            for n in ast.walk(self.tree):
+                if isinstance(n, ast.Call):
+                    self._calls_by_end.setdefault((n.end_lineno, n.end_col_offset), []).append(n)
+        for node in self._calls_by_end.get((span.end_line, span.end_col), ()):
             if (node.lineno, node.col_offset) == (span.line, span.col):
                 return node
             f = node.func

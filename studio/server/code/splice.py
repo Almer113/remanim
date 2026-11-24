@@ -172,11 +172,7 @@ def set_keyword(src: Source, call: ast.Call, name: str, value: str | None) -> Ed
 
 def _enclosing_call(src: Source, call: ast.Call):
     """The call that has `call` as one of its arguments, if any."""
-    for node in ast.walk(src.tree):
-        if isinstance(node, ast.Call) and (any(a is call for a in node.args) or
-                                           any(k.value is call for k in node.keywords)):
-            return node
-    return None
+    return src.enclosing_call(call)
 
 
 def _one_per_line(call, args) -> bool:
