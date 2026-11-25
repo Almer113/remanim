@@ -3,14 +3,15 @@
     .venv/Scripts/python studio/scripts/serve.py start | stop | restart | status [--json]
 
 start   builds the UI if web/src is newer than the build, starts the server
-        (port 8770, this PC only, plus the tailnet name through `tailscale serve`
-        with the token kept in studio/data/access_token), and exits once it answers.
+        (port 8770, this PC only; plus the tailnet name in studio/data/tailnet_name,
+        if that file exists, through `tailscale serve`, with the token kept in
+        studio/data/access_token), and exits once it answers.
 stop    ends the server this script started (its pid, checked against what the
         server says about itself), with its engine processes.
 status  one line of JSON: {"running", "ours", "pid", "since", "message"}.
 
-The server's output goes to studio/data/server.log. Follows the hub contract in
-D:/Projects/AI Code Projects/Home Server Hub/docs/APP_CONTRACT.md.
+The server's output goes to studio/data/server.log. Follows the Home Server Hub's
+app contract (studio/hub.example.json shows the entry).
 """
 
 from __future__ import annotations
@@ -32,9 +33,18 @@ PIDFILE = DATA / "server.pid"
 LOG = DATA / "server.log"
 TOKEN = DATA / "access_token"
 PORT = 8770
-# the name `tailscale serve --https=8770` answers to; other machines need the token
-TAILNET_NAME = "your-pc.your-tailnet.ts.net"
+# one line: the name `tailscale serve --https=8770` answers to, e.g.
+# my-pc.tail1234.ts.net (kept out of git); other machines need the token
+TAILNET_FILE = DATA / "tailnet_name"
 HEALTH = f"http://127.0.0.1:{PORT}/api/health"
+
+
+def tailnet_name() -> str | None:
+    try:
+        name = TAILNET_FILE.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return None
+    return name or None
 
 
 def say(*a):
@@ -146,8 +156,12 @@ def start() -> int:
     DATA.mkdir(parents=True, exist_ok=True)
     if LOG.exists() and LOG.stat().st_size > 5 * 1024 * 1024:
         LOG.replace(LOG.with_suffix(".log.1"))
-    cmd = [sys.executable, "-m", "studio.server", "--port", str(PORT),
-           "--allow-host", TAILNET_NAME, "--token-file", str(TOKEN)]
+    cmd = [sys.executable, "-m", "studio.server", "--port", str(PORT), "--token-file", str(TOKEN)]
+    name = tailnet_name()
+    if name:
+        cmd += ["--allow-host", name]
+    else:
+        say(f"No {TAILNET_FILE.name} in studio/data: this PC only")
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     env.pop("HUB_RUN", None)
     flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP

@@ -54,7 +54,7 @@ because the studio is already running), it says so and stops.
 | Option | What it does |
 |---|---|
 | `--port 8771` | Another port |
-| `--allow-host NAME` | Also answer to `NAME`, for example a `tailscale serve` name, to use the studio from another device. The server still listens on 127.0.0.1 only. It prints a link with a token; other machines must open that link once, and the plain address is refused. Never point `tailscale funnel` at it: it runs your scene files. |
+| `--allow-host NAME` | Also answer to `NAME`, for example a `tailscale serve` name, to use the studio from another device. The server still listens on 127.0.0.1 only. Other machines need the access token once (a link with `?token=`, or the token page); the start-up line says where the token is kept, never the token itself. Never point `tailscale funnel` at it: it runs your scene files. |
 | `--app` | Open the studio in its own window (Edge or Chrome app mode) |
 | `--allow-claude-remote` | Let pages opened through an `--allow-host` name use the Claude panel. Off by default, because the panel runs Claude Code on this machine |
 | `--dev` | Let the Vite dev server (`npm run dev`, port 5173) talk to the studio, while working on the UI |
@@ -62,10 +62,11 @@ because the studio is already running), it says so and stops.
 
 ### Running it all the time
 
-On this PC reManim runs permanently in the background, under the
-[Home Server Hub](../../Home%20Server%20Hub/README.md), which starts it at
-logon and can deploy, stop and restart it. Its hub entry is
-[`hub.json`](hub.json); the commands are in `scripts/serve.py`:
+reManim can run permanently in the background. On the author's PC it runs
+under a small personal launcher (the "Home Server Hub"), which starts it at
+logon and can deploy, stop and restart it. Its entry is `studio/hub.json`,
+kept out of git; [`hub.example.json`](hub.example.json) is the template.
+The commands are in `scripts/serve.py`, and work without the launcher:
 
 ```bash
 .venv/Scripts/python studio/scripts/serve.py start     # or stop, restart, status
@@ -73,13 +74,18 @@ logon and can deploy, stop and restart it. Its hub entry is
 
 `start` builds the UI if `web/src` is newer than the build, then starts
 the server with no window on port 8770, with
-`--allow-host your-pc.your-tailnet.ts.net --token-file studio/data/access_token`.
-The pid file, the log (`server.log`) and the token are in `studio/data/`,
+`--token-file studio/data/access_token`. To reach it from your other
+devices through [Tailscale](https://tailscale.com/), put this machine's
+tailnet name (for example `my-pc.tail1234.ts.net`) on one line in
+`studio/data/tailnet_name` and run
+`tailscale serve --bg --https=8770 http://127.0.0.1:8770`;
+`start` then adds `--allow-host` with that name. The pid file, the log
+(`server.log`), the token and the tailnet name are in `studio/data/`,
 which git ignores. Restart it after changing server code.
 
 About the token:
 - The log never contains it. `server.log` only names the file it's in,
-  because the Hub shows that log to anyone on the tailnet.
+  because a launcher may show that log to anyone on the tailnet.
 - The token page sends it with a form post, so it doesn't end up in
   browser history.
 - If you edit the file by hand, use at least 8 printable ASCII
@@ -93,14 +99,13 @@ About the token:
 | From | Address |
 |---|---|
 | This PC | <http://localhost:8770/> |
-| Tailnet (HTTPS, through `tailscale serve --https=8770`) | <https://your-pc.your-tailnet.ts.net:8770/>. The first visit asks for the token in `studio/data/access_token`; a cookie keeps it for 400 days |
+| Tailnet (HTTPS, through `tailscale serve --https=8770`) | `https://<tailnet name>:8770/`. The first visit asks for the token in `studio/data/access_token`; a cookie keeps it for 400 days |
 | Home network | Not available: the server listens on 127.0.0.1 only, since opening a file runs it. Use the tailnet address, which also works at home |
 
 **Installing it as an app:** open the tailnet address (or
 `http://localhost:8770/` on this PC) in Chrome or Edge, then use the
 install button in the address bar. On an iPhone: Safari, Share, Add to Home
-Screen. The icons and the wordmark come from the logo kit in
-`Logo Builder/projects/remanim/exports/` (copied into `web/public/`).
+Screen. The icons and the wordmark are in `web/public/` and `docs/img/`.
 
 ## The screen
 
@@ -270,7 +275,7 @@ Run the checks:
 .venv/Scripts/python -m studio.tests --quick
 ```
 
-`--quick` runs the unit tests (seconds, no LaTeX). With no flag it
+`--quick` runs the unit tests (about a minute, no LaTeX). With no flag it
 also runs the engine tests (about 8 minutes). `--all` adds the corpus run
 and the benches (about 1.5 hours). Don't run them while the studio
 server is busy: they share `media/Tex_studio`.

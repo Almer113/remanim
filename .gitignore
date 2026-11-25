@@ -24,5 +24,8 @@ studio/web/node_modules/
 studio/web/dist/
 studio/tests/tmp/
 
-# reManim server state (pid, log, access token)
+# reManim server state (pid, log, access token, tailnet name)
 studio/data/
+
+# This PC's Home Server Hub entry (studio/hub.example.json is the template)
+studio/hub.json
